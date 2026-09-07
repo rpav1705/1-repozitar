@@ -3,6 +3,15 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Design tokens – vzhled appky (navy + oranžová, podle firemního vzoru) */
+  --color-navy-DEFAULT: #15304f;
+  --color-navy-dark: #0f2338;
+  --color-accent-DEFAULT: #f2760f;
+  --color-status-ok: #16a34a;
+  --color-status-warn: #f2760f;
+  --color-status-overdue: #dc2626;
+  --color-status-planned: #94a3b8;
 }
 
 @theme inline {
@@ -10,6 +19,14 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-navy: var(--color-navy-DEFAULT);
+  --color-navy-dark: var(--color-navy-dark);
+  --color-accent: var(--color-accent-DEFAULT);
+  --color-status-ok: var(--color-status-ok);
+  --color-status-warn: var(--color-status-warn);
+  --color-status-overdue: var(--color-status-overdue);
+  --color-status-planned: var(--color-status-planned);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,5 +39,5 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, Arial, Helvetica, sans-serif;
 }
