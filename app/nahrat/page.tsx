@@ -9,6 +9,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   query,
   Timestamp,
@@ -279,6 +280,12 @@ type ProcessedZprava = {
   celkove_hodnoceni: string;
   parovani_stav: ParovaniStav;
   posledni_revize_vcas: boolean | null;
+  /**
+   * Termín skutečně přečtený zpátky z planovane_revize hned po zápisu
+   * (jen u "shoda") – přímý důkaz, že updateDoc() opravdu zapsal do
+   * Firestore, ne jen náhled toho, co appka POSLALA.
+   */
+  overenyTerminVPlanu: Date | null;
 };
 
 type SkippedPageEntry = {
@@ -377,6 +384,7 @@ function RevizniZpravyUpload() {
               posledni_revize_vcas,
             });
 
+            let overenyTerminVPlanu: Date | null = null;
             if (parovani_stav === "shoda") {
               // Zpětný odkaz na PDF u záznamu v plánu, ať jde revizní zpráva
               // otevřít přímo z "Přehled zařízení" na dashboardu.
@@ -387,6 +395,11 @@ function RevizniZpravyUpload() {
                 posledni_revizni_zprava_url: pdf_url,
                 posledni_revizni_zprava_id: revizniZpravaRef.id,
               });
+              // Přímé ověření zpětným čtením – potvrdí, že zápis opravdu
+              // došel do Firestore (ne jen že appka volání odeslala).
+              const verifySnap = await getDoc(matchSnap.docs[0].ref);
+              const verifiedTermin = verifySnap.data()?.termin;
+              overenyTerminVPlanu = verifiedTermin instanceof Timestamp ? verifiedTermin.toDate() : null;
             }
 
             allProcessed.push({
@@ -398,6 +411,7 @@ function RevizniZpravyUpload() {
               celkove_hodnoceni: zprava.celkove_hodnoceni,
               parovani_stav,
               posledni_revize_vcas,
+              overenyTerminVPlanu,
             });
           }
         }
@@ -502,10 +516,16 @@ function RevizniZpravyUpload() {
                       <th className="py-1.5 pr-4 font-semibold">Nový termín</th>
                       <th className="py-1.5 pr-4 font-semibold">Hodnocení</th>
                       <th className="py-1.5 pr-4 font-semibold">Párování</th>
+                      <th className="py-1.5 pr-4 font-semibold">Termín v plánu (ověřeno)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {processed.map((p, i) => (
+                    {processed.map((p, i) => {
+                      const terminSedi =
+                        p.parovani_stav !== "shoda" ||
+                        (p.overenyTerminVPlanu !== null &&
+                          p.overenyTerminVPlanu.getTime() === p.novy_termin.getTime());
+                      return (
                       <tr key={i} className="border-b border-gray-100">
                         <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
                         <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ")}</td>
@@ -514,8 +534,17 @@ function RevizniZpravyUpload() {
                         <td className={`py-1.5 pr-4 font-semibold ${PAROVANI_LABELS[p.parovani_stav].className}`}>
                           {PAROVANI_LABELS[p.parovani_stav].label}
                         </td>
+                        <td className={`py-1.5 pr-4 ${terminSedi ? "" : "font-semibold text-status-overdue"}`}>
+                          {p.parovani_stav !== "shoda"
+                            ? "—"
+                            : p.overenyTerminVPlanu
+                              ? p.overenyTerminVPlanu.toLocaleDateString("cs-CZ")
+                              : "chybí i po zápisu!"}
+                          {!terminSedi && " (neshoduje se s novým termínem výše)"}
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
