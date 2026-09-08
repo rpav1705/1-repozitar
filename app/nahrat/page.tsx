@@ -9,17 +9,20 @@ import {
   addDoc,
   collection,
   doc,
+  DocumentData,
   getDoc,
   getDocs,
   query,
+  QueryDocumentSnapshot,
   Timestamp,
   updateDoc,
   where,
   writeBatch,
 } from "firebase/firestore";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
-import { parseRevizniZpravyPdf } from "@/lib/pdfRevizniZprava";
+import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
+import { revizniZpravaToFirestoreFields, revizniZpravaToPlanovaneRevizeFields } from "@/lib/revizniZpravyFirestore";
 import { describeSaveError } from "@/lib/friendlyError";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -372,12 +375,7 @@ function RevizniZpravyUpload() {
             }
 
             const revizniZpravaRef = await addDoc(collection(db, "revizni_zpravy"), {
-              cislo_zarizeni: zprava.cislo_zarizeni,
-              datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
-              novy_termin: Timestamp.fromDate(zprava.novy_termin),
-              celkove_hodnoceni: zprava.celkove_hodnoceni,
-              technik_jmeno: zprava.technik_jmeno,
-              technik_cislo_opravneni: zprava.technik_cislo_opravneni,
+              ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
               soubor_nazev: file.name,
               pdf_storage_path: storagePath,
@@ -394,14 +392,11 @@ function RevizniZpravyUpload() {
               // technik) u záznamu v plánu, ať jde vidět přímo jako sloupce
               // v "Přehledu zařízení" na dashboardu, bez dalšího dotazu.
               await updateDoc(matchSnap.docs[0].ref, {
-                termin: Timestamp.fromDate(zprava.novy_termin),
+                ...revizniZpravaToPlanovaneRevizeFields(zprava),
                 stav: "cekajici",
                 posledni_revize_vcas,
                 posledni_revizni_zprava_url: pdf_url,
                 posledni_revizni_zprava_id: revizniZpravaRef.id,
-                datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
-                technik_jmeno: zprava.technik_jmeno,
-                technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               });
               // Přímé ověření zpětným čtením – potvrdí, že zápis opravdu
               // došel do Firestore (ne jen že appka volání odeslala).
@@ -570,6 +565,260 @@ function RevizniZpravyUpload() {
   );
 }
 
+type ReprocessStav = "aktualizovano" | "aktualizovano_i_v_planu" | "chyba";
+
+type ReprocessResult = {
+  id: string;
+  soubor: string;
+  stranka: number;
+  cislo_zarizeni: string;
+  stav: ReprocessStav;
+  poznamka: string;
+};
+
+const REPROCESS_STAV_LABELS: Record<ReprocessStav, { label: string; className: string }> = {
+  aktualizovano: { label: "Aktualizováno", className: "text-status-ok" },
+  aktualizovano_i_v_planu: { label: "Aktualizováno i v plánu", className: "text-status-ok" },
+  chyba: { label: "Selhalo", className: "text-status-overdue" },
+};
+
+/**
+ * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
+ * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
+ * jimi extrahovaná pole – ať uživatel nemusí soubory znovu ručně nahrávat
+ * pokaždé, když přibude nové extrahované pole (nebo se opraví parsování).
+ * Víc revizních zpráv může odkazovat na stejný nahraný soubor (víc zařízení
+ * na stránku) – soubor se proto stahuje a parsuje jen jednou na skupinu.
+ */
+function RevizniZpravyReprocess() {
+  const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [results, setResults] = useState<ReprocessResult[]>([]);
+  const [error, setError] = useState("");
+
+  const handleReprocess = async () => {
+    setStatus("processing");
+    setResults([]);
+    setError("");
+    setProgress({ done: 0, total: 0 });
+
+    try {
+      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      const docs = snap.docs;
+      setProgress({ done: 0, total: docs.length });
+
+      // Skupina podle pdf_storage_path – víc revizních zpráv (stránek) může
+      // odkazovat na stejný nahraný soubor, ať se nestahuje víckrát.
+      const groups = new Map<string, QueryDocumentSnapshot<DocumentData>[]>();
+      for (const d of docs) {
+        const path = d.data().pdf_storage_path;
+        if (typeof path !== "string") continue;
+        const group = groups.get(path) ?? [];
+        group.push(d);
+        groups.set(path, group);
+      }
+
+      let done = 0;
+      const reportDoc = (result: ReprocessResult) => {
+        done += 1;
+        setProgress({ done, total: docs.length });
+        setResults((prev) => [...prev, result]);
+      };
+
+      const processGroup = async ([storagePath, groupDocs]: [
+        string,
+        QueryDocumentSnapshot<DocumentData>[],
+      ]) => {
+        let freshByStranka: Map<number, ParsedRevizniZprava> | null = null;
+        let downloadError = "";
+        try {
+          const buffer = await getBytes(ref(storage, storagePath));
+          const { zpravy } = await parseRevizniZpravyPdf(buffer);
+          freshByStranka = new Map(zpravy.map((z) => [z.stranka, z]));
+        } catch (err) {
+          downloadError =
+            err instanceof Error ? err.message : "nepodařilo se stáhnout soubor ze Storage";
+        }
+
+        for (const docSnap of groupDocs) {
+          const data = docSnap.data();
+          const soubor = typeof data.soubor_nazev === "string" ? data.soubor_nazev : storagePath;
+          const stranka = typeof data.stranka === "number" ? data.stranka : 0;
+          const cisloPuvodni = typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "";
+
+          const fresh = freshByStranka?.get(stranka);
+
+          if (downloadError) {
+            reportDoc({
+              id: docSnap.id,
+              soubor,
+              stranka,
+              cislo_zarizeni: cisloPuvodni,
+              stav: "chyba",
+              poznamka: downloadError,
+            });
+          } else if (!fresh) {
+            reportDoc({
+              id: docSnap.id,
+              soubor,
+              stranka,
+              cislo_zarizeni: cisloPuvodni,
+              stav: "chyba",
+              poznamka: "stránka se po přeparsování nepodařila znovu rozpoznat",
+            });
+          } else if (fresh.cislo_zarizeni !== cisloPuvodni) {
+            reportDoc({
+              id: docSnap.id,
+              soubor,
+              stranka,
+              cislo_zarizeni: cisloPuvodni,
+              stav: "chyba",
+              poznamka: `číslo zařízení se po přeparsování změnilo (${cisloPuvodni} → ${fresh.cislo_zarizeni}) – přeskočeno`,
+            });
+          } else {
+            try {
+              await updateDoc(docSnap.ref, revizniZpravaToFirestoreFields(fresh));
+
+              let poznamka = "";
+              let planAktualizovan = false;
+              const planIds: string[] = Array.isArray(data.planovane_revize_ids)
+                ? data.planovane_revize_ids
+                : [];
+
+              if (data.parovani_stav === "shoda" && planIds.length === 1) {
+                const planRef = doc(db, "planovane_revize", planIds[0]);
+                const planSnap = await getDoc(planRef);
+                if (planSnap.exists() && planSnap.data().posledni_revizni_zprava_id === docSnap.id) {
+                  await updateDoc(planRef, revizniZpravaToPlanovaneRevizeFields(fresh));
+                  planAktualizovan = true;
+                } else {
+                  poznamka = "párování v plánu mezitím převzala novější revize – plán beze změny";
+                }
+              } else if (data.parovani_stav !== "shoda") {
+                poznamka = "revizní zpráva nikdy neměla jednoznačné párování v plánu";
+              }
+
+              reportDoc({
+                id: docSnap.id,
+                soubor,
+                stranka,
+                cislo_zarizeni: fresh.cislo_zarizeni,
+                stav: planAktualizovan ? "aktualizovano_i_v_planu" : "aktualizovano",
+                poznamka,
+              });
+            } catch (err) {
+              reportDoc({
+                id: docSnap.id,
+                soubor,
+                stranka,
+                cislo_zarizeni: cisloPuvodni,
+                stav: "chyba",
+                poznamka: err instanceof Error ? err.message : "nepodařilo se zapsat do Firestore",
+              });
+            }
+          }
+        }
+      };
+
+      // Skupiny (soubory) zpracováváme s omezenou souběžností – při stovkách
+      // uložených zpráv by čistě sekvenční zpracování trvalo příliš dlouho,
+      // ale neomezená souběžnost by zase zbytečně zatížila Storage/Firestore.
+      const CONCURRENCY = 6;
+      const groupEntries = Array.from(groups.entries());
+      let nextIndex = 0;
+      async function worker() {
+        while (nextIndex < groupEntries.length) {
+          const entry = groupEntries[nextIndex];
+          nextIndex += 1;
+          await processGroup(entry);
+        }
+      }
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+      setStatus("done");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Nepodařilo se načíst uložené revizní zprávy."
+      );
+      setStatus("idle");
+    }
+  };
+
+  const uspesneCount = results.filter((r) => r.stav !== "chyba").length;
+  const chybaCount = results.filter((r) => r.stav === "chyba").length;
+
+  return (
+    <div className="overflow-hidden rounded-lg bg-white shadow-sm">
+      <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
+        Znovu zpracovat uložené revizní zprávy
+      </div>
+      <div className="flex flex-col gap-4 px-[18px] py-5">
+        <p className="text-[12.5px] text-gray-500">
+          Znovu stáhne a naparsuje PDF, která appka už má uložená ve Firebase Storage (podle
+          kolekce <code className="rounded bg-gray-100 px-1 py-0.5">revizni_zpravy</code>), a
+          přepíše jimi extrahovaná pole – bez toho, aby bylo potřeba soubory znovu ručně vybírat
+          na disku. Použij tohle tlačítko vždycky, když appka začne umět vytáhnout z revizní
+          zprávy další údaj (nebo se opraví parsování existujícího), ať se dřív nahrané zprávy
+          doplní/opraví automaticky.
+        </p>
+
+        <div>
+          <button
+            onClick={handleReprocess}
+            disabled={status === "processing"}
+            className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {status === "processing"
+              ? `Zpracovávám… (${progress.done}/${progress.total})`
+              : "Znovu zpracovat uložené revizní zprávy"}
+          </button>
+        </div>
+
+        {error && <p className="text-[12.5px] text-red-600">{error}</p>}
+
+        {status === "done" && (
+          <>
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
+              Zpracováno {results.length} uložených revizních zpráv: {uspesneCount} úspěšně
+              aktualizováno
+              {chybaCount > 0 && `, ${chybaCount} selhalo`}.
+            </div>
+
+            {results.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[12.5px]">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-gray-500">
+                      <th className="py-1.5 pr-4 font-semibold">Soubor</th>
+                      <th className="py-1.5 pr-4 font-semibold">Strana</th>
+                      <th className="py-1.5 pr-4 font-semibold">Číslo zařízení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Výsledek</th>
+                      <th className="py-1.5 pr-4 font-semibold">Poznámka</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.map((r) => (
+                      <tr key={r.id} className="border-b border-gray-100">
+                        <td className="py-1.5 pr-4">{r.soubor}</td>
+                        <td className="py-1.5 pr-4">{r.stranka}</td>
+                        <td className="py-1.5 pr-4">{r.cislo_zarizeni}</td>
+                        <td className={`py-1.5 pr-4 font-semibold ${REPROCESS_STAV_LABELS[r.stav].className}`}>
+                          {REPROCESS_STAV_LABELS[r.stav].label}
+                        </td>
+                        <td className="py-1.5 pr-4 text-gray-500">{r.poznamka || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function NahratPage() {
   return (
     <AuthGate>
@@ -581,6 +830,7 @@ export default function NahratPage() {
           <div className="flex flex-col gap-4 px-7 py-6">
             <PlanUpload />
             <RevizniZpravyUpload />
+            <RevizniZpravyReprocess />
           </div>
         </div>
       )}
