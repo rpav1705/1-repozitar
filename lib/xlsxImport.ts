@@ -8,6 +8,8 @@ export type ParsedPlanRow = {
   termin: Date;
   frekvence: number | null;
   jednotky_frekvence: string;
+  /** Maximo PM číslo (sloupec "PÚ") – prázdné, pokud v souboru chybí. */
+  pu: string;
 };
 
 export type ParseSkip = {
@@ -35,6 +37,13 @@ function normalizeHeader(header: string): string {
 
 function isOriginalAssetHeader(h: string): boolean {
   return /puvodni.*aktiv/.test(h);
+}
+
+// Sloupec "PÚ" (Maximo PM číslo) – přirozený unikátní klíč jednoho řádku plánu,
+// používá se jako Firestore ID záznamu, aby opakovaný import stejný řádek
+// přepsal (aktuální termín), místo aby vytvořil duplicitní dokument.
+function isPuHeader(h: string): boolean {
+  return h === "pu";
 }
 
 // Sloupec s holým číslem/kódem zařízení ("Aktivum" apod.) – ne "Původní aktivum".
@@ -182,6 +191,7 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
     .filter((i) => i >= 0);
   const aktivumIndex = normalized.findIndex((h) => isPlainAssetHeader(h));
   const puvodniAktivumIndex = normalized.findIndex((h) => isOriginalAssetHeader(h));
+  const puIndex = normalized.findIndex((h) => isPuHeader(h));
   const dateIndex = normalized.findIndex((h) => isDateHeader(h));
   const frequencyIndex = normalized.findIndex((h) => isFrequencyHeader(h));
   const frequencyUnitIndex = normalized.findIndex((h) => isFrequencyUnitHeader(h));
@@ -224,6 +234,7 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
         ? Number(frekvenceRaw)
         : null;
     const jednotky_frekvence = frequencyUnitIndex >= 0 ? cellText(row[frequencyUnitIndex]) : "";
+    const pu = puIndex >= 0 ? cellText(row[puIndex]) : "";
 
     if (!cislo_zarizeni) {
       skipped.push({ row: excelRowNumber, reason: "chybí číslo zařízení" });
@@ -240,6 +251,7 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
       termin,
       frekvence: frekvence !== null && !isNaN(frekvence) ? frekvence : null,
       jednotky_frekvence,
+      pu,
     });
   });
 

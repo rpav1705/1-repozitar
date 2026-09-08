@@ -9,12 +9,39 @@ import { collection, doc, writeBatch, Timestamp } from "firebase/firestore";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { describeSaveError } from "@/lib/friendlyError";
 
+// Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
+// rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
+const BATCH_SIZE = 500;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+// Firestore ID nesmí obsahovat "/" a nesmí to být přesně "." nebo "..".
+function sanitizeDocId(raw: string): string {
+  const cleaned = raw.replace(/\//g, "_").trim();
+  return cleaned === "." || cleaned === ".." ? "" : cleaned;
+}
+
+// Stejná logika jako v handleSave – použité tady jen na náhled v UI, ať jde
+// vidět (bez otevírání konzole), jaké ID se skutečně uloží a jestli je stabilní
+// mezi opakovanými importy stejného souboru.
+function previewDocId(row: ParsedPlanRow): string {
+  const puId = row.pu ? sanitizeDocId(row.pu) : "";
+  return puId || "(náhodné – chybí PÚ)";
+}
+
 function PlanUpload() {
   const [file, setFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedPlanRow[]>([]);
   const [skipped, setSkipped] = useState<ParseSkip[]>([]);
   const [status, setStatus] = useState<"idle" | "parsing" | "parsed" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
+  const [savedCount, setSavedCount] = useState(0);
 
   const handleParse = async () => {
     if (!file) return;
@@ -39,21 +66,31 @@ function PlanUpload() {
   const handleSave = async () => {
     setStatus("saving");
     setError("");
+    setSavedCount(0);
     try {
-      const batch = writeBatch(db);
       const col = collection(db, "planovane_revize");
-      rows.forEach((row) => {
-        const ref = doc(col);
-        batch.set(ref, {
-          cislo_zarizeni: row.cislo_zarizeni,
-          popis: row.popis,
-          termin: Timestamp.fromDate(row.termin),
-          frekvence: row.frekvence,
-          jednotky_frekvence: row.jednotky_frekvence,
-          stav: "cekajici",
+      let saved = 0;
+      for (const batchRows of chunk(rows, BATCH_SIZE)) {
+        const batch = writeBatch(db);
+        batchRows.forEach((row) => {
+          // Stabilní ID podle "PÚ" (Maximo PM číslo) – opakovaný import stejného
+          // řádku tak existující záznam přepíše, místo aby vytvořil duplicitu.
+          const puId = row.pu ? sanitizeDocId(row.pu) : "";
+          const ref = puId ? doc(col, puId) : doc(col);
+          batch.set(ref, {
+            cislo_zarizeni: row.cislo_zarizeni,
+            popis: row.popis,
+            termin: Timestamp.fromDate(row.termin),
+            frekvence: row.frekvence,
+            jednotky_frekvence: row.jednotky_frekvence,
+            pu: row.pu,
+            stav: "cekajici",
+          });
         });
-      });
-      await batch.commit();
+        await batch.commit();
+        saved += batchRows.length;
+        setSavedCount(saved);
+      }
       setStatus("saved");
     } catch (err) {
       setError(describeSaveError(err));
@@ -103,7 +140,7 @@ function PlanUpload() {
 
         {status === "saving" && (
           <p className="rounded-md bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
-            Ukládám záznamy do databáze…
+            Ukládám záznamy do databáze… ({savedCount}/{rows.length})
           </p>
         )}
 
@@ -142,6 +179,22 @@ function PlanUpload() {
                   {skipped.map((s, i) => (
                     <li key={i}>
                       řádek {s.row}: {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            {rows.length > 0 && (
+              <details className="text-[12px] text-gray-500">
+                <summary className="cursor-pointer font-semibold">
+                  Náhled Firestore ID (diagnostika duplicit při reimportu)
+                </summary>
+                <ul className="mt-1 list-inside list-disc">
+                  {rows.slice(0, 5).map((row, i) => (
+                    <li key={i}>
+                      {row.cislo_zarizeni} →{" "}
+                      <code className="rounded bg-gray-100 px-1 py-0.5">{previewDocId(row)}</code>
                     </li>
                   ))}
                 </ul>
