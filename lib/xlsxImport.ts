@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import { parseFlexibleDate } from "@/lib/parseDate";
+import { extractEquipmentNumber } from "@/lib/extractEquipmentNumber";
 
 export type ParsedPlanRow = {
   cislo_zarizeni: string;
@@ -19,6 +20,11 @@ export type ParsePlanResult = {
   skipped: ParseSkip[];
 };
 
+type RawTable = {
+  headers: string[];
+  rows: unknown[][];
+};
+
 function normalizeHeader(header: string): string {
   return header
     .normalize("NFD")
@@ -27,14 +33,13 @@ function normalizeHeader(header: string): string {
     .trim();
 }
 
-// Maximo export vede číslo zařízení/stroje (mix čísel a kódů jako "211508", "IMM002", "ZZ015")
-// ve sloupci "Původní aktivum" – ten má přednost, "Aktivum" je jen fallback.
 function isOriginalAssetHeader(h: string): boolean {
   return /puvodni.*aktiv/.test(h);
 }
 
-function isFallbackDeviceHeader(h: string): boolean {
-  return /cislo.*zariz|cislo.*aktiv|^aktivum$|^zarizeni$|assetnum|^asset$|equipment/.test(h);
+// Sloupec s holým číslem/kódem zařízení ("Aktivum" apod.) – ne "Původní aktivum".
+function isPlainAssetHeader(h: string): boolean {
+  return /^aktivum$|^zarizeni$|assetnum|^asset$|equipment/.test(h) && !isOriginalAssetHeader(h);
 }
 
 function isDescriptionHeader(h: string): boolean {
@@ -42,7 +47,7 @@ function isDescriptionHeader(h: string): boolean {
 }
 
 function isDateHeader(h: string): boolean {
-  return /predpoklad.*dokonc|planovane.*dokonc|datum.*dokonc|^termin/.test(h);
+  return /nejblizsi.*splatnosti|predpoklad.*dokonc|planovane.*dokonc|datum.*dokonc|^termin/.test(h);
 }
 
 function isFrequencyUnitHeader(h: string): boolean {
@@ -86,8 +91,22 @@ function decodeHtml(data: ArrayBuffer, sniffed: string): string {
   }
 }
 
-/** Vybere v HTML dokumentu tabulku s nejvíce řádky (obvykle je to ta datová). */
-function parseHtmlTableRows(html: string): Record<string, unknown>[] {
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return "";
+  return String(value)
+    .replace(/ /g, " ")
+    .trim();
+}
+
+/**
+ * Vybere v HTML dokumentu tabulku s nejvíce řádky (obvykle je to ta datová)
+ * a vrátí ji POZIČNĚ (pole hlaviček + pole řádků buněk), ne jako objekt
+ * klíčovaný názvem sloupce – hlavičky se v Maximo exportu opakují
+ * (např. "Popis" je ve stejné tabulce třikrát) a mapování podle názvu by
+ * duplicitní sloupce přepisovalo/ztrácelo.
+ */
+function parseHtmlTableRows(html: string): RawTable {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const tables = Array.from(doc.querySelectorAll("table"));
   if (tables.length === 0) {
@@ -99,27 +118,22 @@ function parseHtmlTableRows(html: string): Record<string, unknown>[] {
   );
 
   const trs = Array.from(table.querySelectorAll("tr"));
-  if (trs.length < 2) return [];
+  if (trs.length < 2) return { headers: [], rows: [] };
 
-  const headerCells = Array.from(trs[0].querySelectorAll("th, td")).map(
-    (cell) => (cell.textContent ?? "").trim()
+  const headers = Array.from(trs[0].querySelectorAll("th, td")).map((cell) =>
+    cellText(cell.textContent)
   );
 
-  const rows: Record<string, unknown>[] = [];
+  const rows: unknown[][] = [];
   for (let i = 1; i < trs.length; i++) {
     const cells = Array.from(trs[i].querySelectorAll("th, td"));
     if (cells.length === 0) continue;
-    const row: Record<string, unknown> = {};
-    headerCells.forEach((header, idx) => {
-      const key = header || `sloupec_${idx + 1}`;
-      row[key] = cells[idx] ? (cells[idx].textContent ?? "").trim() : null;
-    });
-    rows.push(row);
+    rows.push(cells.map((cell) => cellText(cell.textContent)));
   }
-  return rows;
+  return { headers, rows };
 }
 
-function readRawRows(data: ArrayBuffer): Record<string, unknown>[] {
+function readRawTable(data: ArrayBuffer): RawTable {
   const sniffed = sniffAsText(data);
 
   if (isHtmlDocument(sniffed)) {
@@ -131,7 +145,12 @@ function readRawRows(data: ArrayBuffer): Record<string, unknown>[] {
     const workbook = XLSX.read(data, { type: "array", cellDates: true });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
-    return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+    // header: 1 => pole polí (poziční), ne objekty klíčované názvem sloupce –
+    // ze stejného důvodu jako u HTML tabulky výše (duplicitní názvy sloupců).
+    const allRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null });
+    const [headerRow, ...dataRows] = allRows;
+    const headers = (headerRow ?? []).map((h) => cellText(h));
+    return { headers, rows: dataRows };
   } catch {
     throw new Error(
       "Soubor se nepodařilo přečíst jako Excel ani jako HTML tabulku. Zkontroluj, že jde o platný export plánu revizí (.xls/.xlsx), a zkus to nahrát znovu."
@@ -142,48 +161,69 @@ function readRawRows(data: ArrayBuffer): Record<string, unknown>[] {
 /**
  * Naparsuje export plánu revizí (sloupce podobné Maximo exportu) – ať už jde
  * o skutečný binární/OOXML sešit, nebo o HTML tabulku uloženou s příponou .xls.
- * Názvy sloupců hledá flexibilně (bez diakritiky, různé pořadí).
+ * Sloupce se mapují podle POŘADÍ (indexu), ne podle názvu hlavičky – hlavička
+ * "Popis" se v tomto exportu opakuje vícekrát (kód zařízení, popis aktiva,
+ * popis pracovního postupu) a mapování podle názvu by je nešlo rozlišit.
  */
 export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
-  const rawRows = readRawRows(data);
+  const { headers, rows: rawRows } = readRawTable(data);
 
   const rows: ParsedPlanRow[] = [];
   const skipped: ParseSkip[] = [];
 
-  if (rawRows.length === 0) {
+  if (headers.length === 0 || rawRows.length === 0) {
     return { rows, skipped };
   }
 
-  const headers = Object.keys(rawRows[0]);
-  const deviceHeader =
-    headers.find((h) => isOriginalAssetHeader(normalizeHeader(h))) ??
-    headers.find((h) => isFallbackDeviceHeader(normalizeHeader(h)));
-  const descHeader = headers.find((h) => isDescriptionHeader(normalizeHeader(h)));
-  const dateHeader = headers.find((h) => isDateHeader(normalizeHeader(h)));
-  const frequencyHeader = headers.find((h) => isFrequencyHeader(normalizeHeader(h)));
-  const frequencyUnitHeader = headers.find((h) => isFrequencyUnitHeader(normalizeHeader(h)));
+  const normalized = headers.map(normalizeHeader);
 
-  if (!deviceHeader || !dateHeader) {
+  const descIndices = normalized
+    .map((h, i) => (isDescriptionHeader(h) ? i : -1))
+    .filter((i) => i >= 0);
+  const aktivumIndex = normalized.findIndex((h) => isPlainAssetHeader(h));
+  const puvodniAktivumIndex = normalized.findIndex((h) => isOriginalAssetHeader(h));
+  const dateIndex = normalized.findIndex((h) => isDateHeader(h));
+  const frequencyIndex = normalized.findIndex((h) => isFrequencyHeader(h));
+  const frequencyUnitIndex = normalized.findIndex((h) => isFrequencyUnitHeader(h));
+
+  // V tomto exportu je "Popis" třikrát: kód zařízení (před sloupcem "Aktivum"),
+  // popis aktiva (hned za "Aktivum") a popis pracovního postupu (na konci).
+  const codeDescIndex =
+    aktivumIndex >= 0
+      ? [...descIndices].reverse().find((i) => i < aktivumIndex)
+      : undefined;
+  const assetDescIndex =
+    aktivumIndex >= 0 ? descIndices.find((i) => i > aktivumIndex) : undefined;
+  const fallbackDescIndex = descIndices[0];
+
+  const hasDeviceSource = codeDescIndex !== undefined || aktivumIndex >= 0 || puvodniAktivumIndex >= 0;
+
+  if (!hasDeviceSource || dateIndex < 0) {
     throw new Error(
-      "V souboru se nepodařilo najít sloupec s číslem zařízení a/nebo termínem (Předpokládané dokončení). Zkontroluj hlavičky sloupců."
+      "V souboru se nepodařilo najít sloupec s číslem zařízení a/nebo termínem (Nejbližší další datum splatnosti). Zkontroluj hlavičky sloupců."
     );
   }
 
   rawRows.forEach((row, index) => {
     const excelRowNumber = index + 2; // +1 za hlavičku, +1 protože index je od 0
-    const cisloRaw = row[deviceHeader];
-    const cislo_zarizeni = cisloRaw === null || cisloRaw === undefined ? "" : String(cisloRaw).trim();
-    const termin = parseFlexibleDate(row[dateHeader]);
-    const popis = descHeader && row[descHeader] != null ? String(row[descHeader]).trim() : "";
-    const frekvenceRaw = frequencyHeader ? row[frequencyHeader] : null;
+
+    const codeRaw = codeDescIndex !== undefined ? cellText(row[codeDescIndex]) : "";
+    const aktivumRaw = aktivumIndex >= 0 ? cellText(row[aktivumIndex]) : "";
+    const puvodniRaw = puvodniAktivumIndex >= 0 ? cellText(row[puvodniAktivumIndex]) : "";
+
+    const cislo_zarizeni =
+      extractEquipmentNumber(codeRaw) ??
+      extractEquipmentNumber(aktivumRaw) ??
+      (aktivumRaw || puvodniRaw || "");
+
+    const termin = parseFlexibleDate(row[dateIndex]);
+    const popis = cellText(row[assetDescIndex ?? fallbackDescIndex]) || codeRaw;
+    const frekvenceRaw = frequencyIndex >= 0 ? row[frequencyIndex] : null;
     const frekvence =
       frekvenceRaw !== null && frekvenceRaw !== undefined && frekvenceRaw !== ""
         ? Number(frekvenceRaw)
         : null;
-    const jednotky_frekvence =
-      frequencyUnitHeader && row[frequencyUnitHeader] != null
-        ? String(row[frequencyUnitHeader]).trim()
-        : "";
+    const jednotky_frekvence = frequencyUnitIndex >= 0 ? cellText(row[frequencyUnitIndex]) : "";
 
     if (!cislo_zarizeni) {
       skipped.push({ row: excelRowNumber, reason: "chybí číslo zařízení" });
