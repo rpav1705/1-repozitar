@@ -42,4 +42,6 @@ next-env.d.ts
 
 # vzorové/pomocné soubory pro ruční testování importu (obsahují reálná interní data)
 vzorovy-plan_1.xls
-claude-code-oprava-xls_2.txt
+claude-code-*.txt
+165022  1-2026.pdf
+vzorova-revizni-zprava.pdf
