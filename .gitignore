@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# vzorové/pomocné soubory pro ruční testování importu (obsahují reálná interní data)
+vzorovy-plan_1.xls
+claude-code-oprava-xls_2.txt
