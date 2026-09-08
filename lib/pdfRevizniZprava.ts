@@ -98,6 +98,38 @@ function lastDayOfMonth(year: number, month: number): Date {
   return new Date(year, month, 0);
 }
 
+/** "1/27", "01/27" i "1/2027" (měsíc/rok, dvou- i čtyřciferný) -> poslední den daného měsíce. */
+function parseMesicRok(raw: string): Date | null {
+  const match = raw.trim().match(/^(\d{1,2})\/(\d{2,4})/);
+  if (!match) return null;
+  const month = Number(match[1]);
+  if (month < 1 || month > 12) return null;
+  const yearRaw = match[2];
+  const year = yearRaw.length === 2 ? 2000 + Number(yearRaw) : Number(yearRaw);
+  return lastDayOfMonth(year, month);
+}
+
+/**
+ * Společný parser hodnoty termínu příští revize pro obě šablony – zkusí
+ * postupně přesné datum, český název měsíce + rok a zkrácený číselný formát
+ * měsíc/rok (dvou- i čtyřciferný rok).
+ */
+function parseTerminHodnota(raw: string): Date | null {
+  const text = raw.trim();
+
+  const exact = parseFlexibleDate(text);
+  if (exact) return exact;
+
+  const monthNameMatch = text.match(/^(\p{L}+)\s+(\d{4})/u);
+  if (monthNameMatch) {
+    const month = CZECH_MONTHS[monthNameMatch[1].toLowerCase()];
+    const year = Number(monthNameMatch[2]);
+    if (month) return lastDayOfMonth(year, month);
+  }
+
+  return parseMesicRok(text);
+}
+
 // ---------------------------------------------------------------------------
 // Šablona A: "Protokol o pravidelné revizi elektrického spotřebiče"
 // (program ILLKO Studio, dle ČSN 33 1600 ed.2).
@@ -112,25 +144,9 @@ function extractDatumProvedeniSpotrebic(lines: string[]): Date | null {
   return raw ? parseFlexibleDate(raw) : null;
 }
 
-function parseTerminValueSpotrebic(raw: string): Date | null {
-  const text = raw.trim();
-
-  const exact = parseFlexibleDate(text);
-  if (exact) return exact;
-
-  const monthMatch = text.match(/^(\p{L}+)\s+(\d{4})/u);
-  if (monthMatch) {
-    const month = CZECH_MONTHS[monthMatch[1].toLowerCase()];
-    const year = Number(monthMatch[2]);
-    if (month) return lastDayOfMonth(year, month);
-  }
-
-  return null;
-}
-
 function extractTerminSpotrebic(lines: string[]): Date | null {
   const raw = findValueAfterLabel(lines, /Řádný termín příští revize je nejpozději do:\s*(.+)/);
-  return raw ? parseTerminValueSpotrebic(raw) : null;
+  return raw ? parseTerminHodnota(raw) : null;
 }
 
 /**
@@ -213,19 +229,9 @@ function extractDatumProvedeniStroj(lines: string[]): Date | null {
   return raw ? parseFlexibleDate(raw) : null;
 }
 
-/** "1/2027" (měsíc/rok) -> konzervativně poslední den daného měsíce. */
-function parseMesicRok(raw: string): Date | null {
-  const match = raw.trim().match(/^(\d{1,2})\/(\d{4})/);
-  if (!match) return null;
-  const month = Number(match[1]);
-  const year = Number(match[2]);
-  if (month < 1 || month > 12) return null;
-  return lastDayOfMonth(year, month);
-}
-
 function extractTerminStroj(lines: string[]): Date | null {
   const raw = findValueAfterLabel(lines, /Stanovení termínu další revize:\s*(.+)/);
-  return raw ? parseMesicRok(raw) : null;
+  return raw ? parseTerminHodnota(raw) : null;
 }
 
 /**
