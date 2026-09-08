@@ -390,14 +390,18 @@ function RevizniZpravyUpload() {
 
             let overenyTerminVPlanu: Date | null = null;
             if (parovani_stav === "shoda") {
-              // Zpětný odkaz na PDF u záznamu v plánu, ať jde revizní zpráva
-              // otevřít přímo z "Přehled zařízení" na dashboardu.
+              // Zpětný odkaz na PDF a údaje z revizní zprávy (datum provedení,
+              // technik) u záznamu v plánu, ať jde vidět přímo jako sloupce
+              // v "Přehledu zařízení" na dashboardu, bez dalšího dotazu.
               await updateDoc(matchSnap.docs[0].ref, {
                 termin: Timestamp.fromDate(zprava.novy_termin),
                 stav: "cekajici",
                 posledni_revize_vcas,
                 posledni_revizni_zprava_url: pdf_url,
                 posledni_revizni_zprava_id: revizniZpravaRef.id,
+                datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
+                technik_jmeno: zprava.technik_jmeno,
+                technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               });
               // Přímé ověření zpětným čtením – potvrdí, že zápis opravdu
               // došel do Firestore (ne jen že appka volání odeslala).
