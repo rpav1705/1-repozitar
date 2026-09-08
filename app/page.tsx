@@ -51,6 +51,17 @@ function computeStatus(termin: Date | null, startOfToday: Date, warnUntil: Date)
   return "planned";
 }
 
+// Filtr tabulky "Přehled zařízení" ovládaný kliknutím na statistické karty
+// (a na tlačítko "Nutno doplnit data") – "all" = žádný filtr, výchozí stav.
+type ActiveFilter = "all" | "warn" | "overdue" | "missing";
+
+const FILTER_LABELS: Record<ActiveFilter, string> = {
+  all: "Všechny záznamy",
+  warn: "Blíží se termín",
+  overdue: "Po termínu",
+  missing: "Nutno doplnit data",
+};
+
 type DashboardStats = {
   total: number;
   warn: number;
@@ -142,37 +153,47 @@ function useDashboardData() {
 
 function DashboardOverview() {
   const { data, error, loading } = useDashboardData();
-  const [showOnlyMissing, setShowOnlyMissing] = useState(false);
+  const [filter, setFilter] = useState<ActiveFilter>("all");
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const warnUntil = new Date(startOfToday);
   warnUntil.setDate(warnUntil.getDate() + WARN_DAYS);
 
-  const stats = [
+  const stats: {
+    label: string;
+    value: string;
+    note: string;
+    color: string;
+    filterValue: ActiveFilter | null;
+  }[] = [
     {
       label: "Aktivní revize",
       value: data ? String(data.stats.total) : "—",
       note: "naplánováno · probíhá",
       color: "border-blue-600 text-blue-600",
+      filterValue: "all",
     },
     {
       label: "Blíží se termín",
       value: data ? String(data.stats.warn) : "—",
       note: "do 14 dnů",
       color: "border-accent text-accent",
+      filterValue: "warn",
     },
     {
       label: "Po termínu",
       value: data ? String(data.stats.overdue) : "—",
       note: data && data.stats.overdue > 0 ? "vyžaduje pozornost" : "žádné záznamy",
       color: "border-status-overdue text-status-overdue",
+      filterValue: "overdue",
     },
     {
       label: "Splněno včas",
       value: "—",
       note: "zatím žádná data",
       color: "border-status-ok text-status-ok",
+      filterValue: null,
     },
   ];
 
@@ -183,20 +204,30 @@ function DashboardOverview() {
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((s) => (
-          <div
-            key={s.label}
-            className={`rounded-lg border-l-4 bg-white px-[18px] py-4 shadow-sm ${s.color.split(" ")[0]}`}
-          >
-            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
-              {s.label}
-            </div>
-            <div className={`mt-1.5 text-[28px] font-bold ${s.color.split(" ")[1]}`}>
-              {s.value}
-            </div>
-            <div className="mt-0.5 text-[11px] text-gray-400">{s.note}</div>
-          </div>
-        ))}
+        {stats.map((s) => {
+          const clickable = s.filterValue !== null;
+          const isActive = clickable && s.filterValue === filter;
+          return (
+            <button
+              key={s.label}
+              type="button"
+              disabled={!clickable}
+              onClick={() => s.filterValue && setFilter(s.filterValue)}
+              title={clickable ? `Zobrazit jen: ${s.label}` : "Zatím bez dat"}
+              className={`rounded-lg border-l-4 bg-white px-[18px] py-4 text-left shadow-sm transition-shadow ${s.color.split(" ")[0]} ${
+                clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"
+              } ${isActive ? "ring-2 ring-navy ring-offset-1" : ""}`}
+            >
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                {s.label}
+              </div>
+              <div className={`mt-1.5 text-[28px] font-bold ${s.color.split(" ")[1]}`}>
+                {s.value}
+              </div>
+              <div className="mt-0.5 text-[11px] text-gray-400">{s.note}</div>
+            </button>
+          );
+        })}
       </div>
 
       <div className="flex flex-wrap gap-3">
@@ -215,10 +246,10 @@ function DashboardOverview() {
         </button>
         {data && data.stats.missingTermin > 0 && (
           <button
-            onClick={() => setShowOnlyMissing((v) => !v)}
+            onClick={() => setFilter("missing")}
             title="Záznamy z importu, u kterých se nepodařilo rozpoznat termín – je potřeba je ručně doplnit."
             className={`rounded-md border px-5 py-2.5 text-[13px] font-semibold tracking-wide transition-colors ${
-              showOnlyMissing
+              filter === "missing"
                 ? "border-status-missing bg-status-missing text-white"
                 : "border-status-missing bg-white text-status-missing hover:bg-gray-50"
             }`}
@@ -230,25 +261,35 @@ function DashboardOverview() {
 
       {(() => {
         const visibleRows = data
-          ? showOnlyMissing
-            ? data.rows.filter((row) => row.stav === MISSING_TERMIN_STAV)
-            : data.rows
+          ? data.rows.filter((row) => {
+              if (filter === "all") return true;
+              return computeStatus(row.termin, startOfToday, warnUntil) === filter;
+            })
           : [];
 
         return (
           <div className="overflow-hidden rounded-lg bg-white shadow-sm">
             <div className="flex items-center justify-between bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
-              <span>Přehled zařízení{showOnlyMissing && " — nutno doplnit data"}</span>
+              <span>Přehled zařízení</span>
               <span className="text-[12px] font-normal text-white/60">
-                {data
-                  ? showOnlyMissing
-                    ? `${data.stats.missingTermin} záznamů`
-                    : `${data.stats.total} záznamů`
-                  : loading
-                    ? "Načítám…"
-                    : "0 záznamů"}
+                {data ? `${visibleRows.length} záznamů` : loading ? "Načítám…" : "0 záznamů"}
               </span>
             </div>
+
+            {data && filter !== "all" && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50 px-[18px] py-2 text-[12px] text-gray-600">
+                <span>
+                  Zobrazeno: <span className="font-semibold">{FILTER_LABELS[filter]}</span> (
+                  {visibleRows.length} záznamů)
+                </span>
+                <button
+                  onClick={() => setFilter("all")}
+                  className="font-semibold text-navy underline-offset-2 hover:underline"
+                >
+                  Zobrazit vše
+                </button>
+              </div>
+            )}
 
             {loading && (
               <div className="px-[18px] py-10 text-center text-[13px] text-gray-400">
@@ -258,9 +299,9 @@ function DashboardOverview() {
 
             {!loading && data && visibleRows.length === 0 && (
               <div className="px-[18px] py-10 text-center text-[13px] text-gray-400">
-                {showOnlyMissing
-                  ? "Žádné záznamy s chybějícím termínem."
-                  : "Zatím žádná zařízení. Jakmile přidáme nahrávání .xls plánu a PDF protokolů, zobrazí se zde přehled revizí."}
+                {filter === "all"
+                  ? "Zatím žádná zařízení. Jakmile přidáme nahrávání .xls plánu a PDF protokolů, zobrazí se zde přehled revizí."
+                  : `Žádné záznamy pro filtr „${FILTER_LABELS[filter]}“.`}
               </div>
             )}
 
@@ -299,16 +340,10 @@ function DashboardOverview() {
                     })}
                   </tbody>
                 </table>
-                {!showOnlyMissing && data.stats.total > data.rows.length && (
+                {data.stats.total > data.rows.length && (
                   <p className="px-[18px] py-2 text-[11px] text-gray-400">
-                    Zobrazeno prvních {data.rows.length} z {data.stats.total} záznamů (seřazeno podle
-                    nejbližšího termínu).
-                  </p>
-                )}
-                {showOnlyMissing && data.stats.missingTermin > visibleRows.length && (
-                  <p className="px-[18px] py-2 text-[11px] text-gray-400">
-                    Zobrazeno {visibleRows.length} z {data.stats.missingTermin} záznamů bez termínu
-                    (mimo prvních {TABLE_LIMIT} načtených řádků).
+                    Načteno prvních {data.rows.length} z {data.stats.total} záznamů celkem (limit
+                    dotazu) – filtry a řazení pracují jen s touto načtenou částí.
                   </p>
                 )}
               </div>
