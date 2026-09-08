@@ -17,7 +17,9 @@ import { AppNav } from "@/components/AppNav";
 import { db } from "@/lib/firebase";
 
 const PLAN_COLLECTION = "planovane_revize";
-const TABLE_LIMIT = 100;
+// Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
+// bezpečnostní strop, ať jedno načtení nikdy neroztáhne dotaz do nekonečna.
+const TABLE_LIMIT = 5000;
 const WARN_DAYS = 14;
 const MISSING_TERMIN_STAV = "chybi_termin";
 
