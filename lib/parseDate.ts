@@ -1,5 +1,5 @@
 /**
- * Flexibilní parsování dat z Excelu / PDF servisních zpráv.
+ * Flexibilní parsování dat z Excelu / PDF revizních zpráv.
  * Podporuje JS Date (z xlsx s cellDates: true) i textové formáty
  * jako DD.MM.YYYY, DD. MM. YYYY, DD/MM/YYYY, DD-MM-YYYY nebo YYYY-MM-DD.
  */

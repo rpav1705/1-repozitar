@@ -2,9 +2,10 @@
  * Vytáhne z libovolného textu číslo zařízení ve tvaru "písmena + číslice"
  * (alespoň 2 písmena a alespoň 2 číslice, přímo za sebou).
  *
- * Používá se jak při importu .xls (sloupec s kódem typu "REV-E-ASST007-1R"
- * i sloupec s holým číslem "ASST007"), tak později při čtení PDF servisních
- * protokolů, aby se párování dělalo podle stejného extrahovaného čísla.
+ * Používá se při importu .xls (sloupec s kódem typu "REV-E-ASST007-1R"
+ * i sloupec s holým číslem "ASST007"). Revizní zprávy (PDF) mají číslo
+ * zařízení uvedené přímo a čistě v poli "Inventární číslo:" (viz
+ * lib/pdfRevizniZprava.ts), takže tuhle funkci nepotřebují.
  *
  * U "REV-E-ASST007-1R" vrátí "ASST007" (ne "REV" – tomu chybí navazující
  * číslice – ani "1R" – tam je pořadí písmeno/číslice obráceně).

@@ -4,9 +4,21 @@ import { useState } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
-import { db } from "@/lib/firebase";
-import { collection, doc, writeBatch, Timestamp } from "firebase/firestore";
+import { db, storage } from "@/lib/firebase";
+import {
+  addDoc,
+  collection,
+  doc,
+  getDocs,
+  query,
+  Timestamp,
+  updateDoc,
+  where,
+  writeBatch,
+} from "firebase/firestore";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
+import { parseRevizniZpravyPdf } from "@/lib/pdfRevizniZprava";
 import { describeSaveError } from "@/lib/friendlyError";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -256,6 +268,265 @@ function PlanUpload() {
   );
 }
 
+type ParovaniStav = "shoda" | "bez_shody" | "vice_shod";
+
+type ProcessedZprava = {
+  soubor: string;
+  stranka: number;
+  cislo_zarizeni: string;
+  datum_provedeni: Date;
+  novy_termin: Date;
+  celkove_hodnoceni: string;
+  parovani_stav: ParovaniStav;
+  posledni_revize_vcas: boolean | null;
+};
+
+type SkippedPageEntry = {
+  soubor: string;
+  stranka: number;
+  duvod: string;
+};
+
+const PAROVANI_LABELS: Record<ParovaniStav, { label: string; className: string }> = {
+  shoda: { label: "Spárováno a aktualizováno", className: "text-status-ok" },
+  bez_shody: { label: "Bez odpovídajícího záznamu v plánu", className: "text-status-warn" },
+  vice_shod: { label: "Víc shod – vyžaduje ruční kontrolu", className: "text-status-missing" },
+};
+
+function sanitizeStoragePathSegment(name: string): string {
+  return name.replace(/\//g, "_");
+}
+
+function pluralizeSoubor(count: number): string {
+  if (count === 1) return "soubor";
+  if (count >= 2 && count <= 4) return "soubory";
+  return "souborů";
+}
+
+function RevizniZpravyUpload() {
+  const [files, setFiles] = useState<File[]>([]);
+  const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [processed, setProcessed] = useState<ProcessedZprava[]>([]);
+  const [skippedPages, setSkippedPages] = useState<SkippedPageEntry[]>([]);
+
+  const handleProcess = async () => {
+    if (files.length === 0) return;
+    setStatus("processing");
+    setProcessed([]);
+    setSkippedPages([]);
+    setProgress({ done: 0, total: files.length });
+
+    const allProcessed: ProcessedZprava[] = [];
+    const allSkipped: SkippedPageEntry[] = [];
+
+    for (const file of files) {
+      try {
+        const buffer = await file.arrayBuffer();
+        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer);
+
+        for (const p of preskoceno) {
+          allSkipped.push({ soubor: file.name, stranka: p.stranka, duvod: p.duvod });
+        }
+
+        if (zpravy.length > 0) {
+          // Rozdělení jednotlivých stránek do samostatných PDF by vyžadovalo další
+          // knihovnu – ukládáme proto celý nahraný soubor jednou a každá z něj
+          // rozpoznaná revizní zpráva na něj odkazuje i s číslem stránky.
+          const storagePath = `revizni_zpravy/${Date.now()}_${sanitizeStoragePathSegment(file.name)}`;
+          const fileRef = ref(storage, storagePath);
+          await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
+          const pdf_url = await getDownloadURL(fileRef);
+
+          for (const zprava of zpravy) {
+            const planQuery = query(
+              collection(db, "planovane_revize"),
+              where("cislo_zarizeni", "==", zprava.cislo_zarizeni)
+            );
+            const matchSnap = await getDocs(planQuery);
+            const planovane_revize_ids = matchSnap.docs.map((d) => d.id);
+
+            let parovani_stav: ParovaniStav;
+            let posledni_revize_vcas: boolean | null = null;
+
+            if (matchSnap.docs.length === 0) {
+              parovani_stav = "bez_shody";
+            } else if (matchSnap.docs.length > 1) {
+              // Zpráva neurčuje, kterého konkrétního plánu (typu revize) se týká –
+              // při víc shodách proto nic automaticky needitujeme, jen upozorníme.
+              parovani_stav = "vice_shod";
+            } else {
+              parovani_stav = "shoda";
+              const existingTermin = matchSnap.docs[0].data().termin;
+              const puvodniTermin = existingTermin instanceof Timestamp ? existingTermin.toDate() : null;
+              posledni_revize_vcas = puvodniTermin ? zprava.datum_provedeni <= puvodniTermin : null;
+            }
+
+            const revizniZpravaRef = await addDoc(collection(db, "revizni_zpravy"), {
+              cislo_zarizeni: zprava.cislo_zarizeni,
+              datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
+              novy_termin: Timestamp.fromDate(zprava.novy_termin),
+              celkove_hodnoceni: zprava.celkove_hodnoceni,
+              stranka: zprava.stranka,
+              soubor_nazev: file.name,
+              pdf_storage_path: storagePath,
+              pdf_url,
+              nahrano: Timestamp.fromDate(new Date()),
+              planovane_revize_ids,
+              parovani_stav,
+              posledni_revize_vcas,
+            });
+
+            if (parovani_stav === "shoda") {
+              // Zpětný odkaz na PDF u záznamu v plánu, ať jde revizní zpráva
+              // otevřít přímo z "Přehled zařízení" na dashboardu.
+              await updateDoc(matchSnap.docs[0].ref, {
+                termin: Timestamp.fromDate(zprava.novy_termin),
+                stav: "cekajici",
+                posledni_revize_vcas,
+                posledni_revizni_zprava_url: pdf_url,
+                posledni_revizni_zprava_id: revizniZpravaRef.id,
+              });
+            }
+
+            allProcessed.push({
+              soubor: file.name,
+              stranka: zprava.stranka,
+              cislo_zarizeni: zprava.cislo_zarizeni,
+              datum_provedeni: zprava.datum_provedeni,
+              novy_termin: zprava.novy_termin,
+              celkove_hodnoceni: zprava.celkove_hodnoceni,
+              parovani_stav,
+              posledni_revize_vcas,
+            });
+          }
+        }
+      } catch (err) {
+        // Chyba tu může být z libovolné fáze (čtení PDF, upload do Storage,
+        // dotaz/zápis do Firestore) – ukážeme rovnou její vlastní zprávu,
+        // ne obecnou "nepodařilo se uložit" (ta by mohla být zavádějící).
+        allSkipped.push({
+          soubor: file.name,
+          stranka: 0,
+          duvod:
+            err instanceof Error && err.message
+              ? err.message
+              : "soubor se nepodařilo zpracovat kvůli neznámé chybě",
+        });
+      }
+
+      setProgress((p) => ({ ...p, done: p.done + 1 }));
+    }
+
+    setProcessed(allProcessed);
+    setSkippedPages(allSkipped);
+    setStatus(allProcessed.length === 0 && allSkipped.length === 0 ? "idle" : "done");
+  };
+
+  const shodaCount = processed.filter((p) => p.parovani_stav === "shoda").length;
+  const bezShodyCount = processed.filter((p) => p.parovani_stav === "bez_shody").length;
+  const viceShodCount = processed.filter((p) => p.parovani_stav === "vice_shod").length;
+
+  return (
+    <div className="overflow-hidden rounded-lg bg-white shadow-sm">
+      <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
+        Import revizních zpráv (PDF)
+      </div>
+      <div className="flex flex-col gap-4 px-[18px] py-5">
+        <p className="text-[12.5px] text-gray-500">
+          Nahraj jednu nebo víc revizních zpráv (protokol o pravidelné revizi dle ČSN 33 1600 ed.2,
+          program ILLKO Studio) – ať už samostatné PDF pro jedno zařízení, nebo jeden soubor s
+          revizními zprávami pro víc zařízení (jedna na stránku). Číslo zařízení a ostatní údaje se
+          čtou výhradně z obsahu PDF, ne z názvu souboru. Úspěšně rozpoznané zprávy se spárují s
+          plánem revizí (kolekce <code className="rounded bg-gray-100 px-1 py-0.5">planovane_revize</code>{" "}
+          podle pole <code className="rounded bg-gray-100 px-1 py-0.5">cislo_zarizeni</code>) a uloží
+          se do kolekce <code className="rounded bg-gray-100 px-1 py-0.5">revizni_zpravy</code>.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="file"
+            accept="application/pdf"
+            multiple
+            onChange={(e) => {
+              setFiles(Array.from(e.target.files ?? []));
+              setProcessed([]);
+              setSkippedPages([]);
+              setStatus("idle");
+            }}
+            className="text-[13px]"
+          />
+          <button
+            onClick={handleProcess}
+            disabled={files.length === 0 || status === "processing"}
+            className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {status === "processing"
+              ? `Zpracovávám… (${progress.done}/${progress.total})`
+              : files.length > 0
+                ? `Zpracovat ${files.length} ${pluralizeSoubor(files.length)}`
+                : "Zpracovat soubory"}
+          </button>
+        </div>
+
+        {status === "done" && (
+          <>
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
+              Rozpoznáno {processed.length} revizních zpráv: {shodaCount} spárováno a aktualizováno
+              {bezShodyCount > 0 && `, ${bezShodyCount} bez odpovídajícího záznamu v plánu`}
+              {viceShodCount > 0 && `, ${viceShodCount} vyžaduje ruční kontrolu (víc shod)`}
+              {skippedPages.length > 0 && ` — nerozpoznáno ${skippedPages.length} stránek/souborů`}.
+            </div>
+
+            {skippedPages.length > 0 && (
+              <details className="text-[12px] text-gray-500">
+                <summary className="cursor-pointer font-semibold">Nerozpoznané stránky/soubory</summary>
+                <ul className="mt-1 list-inside list-disc">
+                  {skippedPages.map((s, i) => (
+                    <li key={i}>
+                      {s.soubor}
+                      {s.stranka > 0 ? `, strana ${s.stranka}` : ""}: {s.duvod}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            {processed.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[12.5px]">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-gray-500">
+                      <th className="py-1.5 pr-4 font-semibold">Číslo zařízení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Provedeno</th>
+                      <th className="py-1.5 pr-4 font-semibold">Nový termín</th>
+                      <th className="py-1.5 pr-4 font-semibold">Hodnocení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Párování</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {processed.map((p, i) => (
+                      <tr key={i} className="border-b border-gray-100">
+                        <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
+                        <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ")}</td>
+                        <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ")}</td>
+                        <td className="py-1.5 pr-4">{p.celkove_hodnoceni || "—"}</td>
+                        <td className={`py-1.5 pr-4 font-semibold ${PAROVANI_LABELS[p.parovani_stav].className}`}>
+                          {PAROVANI_LABELS[p.parovani_stav].label}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function NahratPage() {
   return (
     <AuthGate>
@@ -266,6 +537,7 @@ export default function NahratPage() {
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <PlanUpload />
+            <RevizniZpravyUpload />
           </div>
         </div>
       )}

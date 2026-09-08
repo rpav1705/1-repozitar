@@ -30,13 +30,18 @@ type PlanRow = {
   /** null = při importu se nepodařilo rozpoznat termín (stav "chybi_termin"). */
   termin: Date | null;
   stav: string;
+  /** null = zatím žádná revizní zpráva; jinak výsledek poslední spárované revize. */
+  posledniRevizeVcas: boolean | null;
+  /** URL PDF poslední spárované revizní zprávy ve Firebase Storage, nebo null. */
+  posledniRevizniZpravaUrl: string | null;
 };
 
 type RowStatus = "overdue" | "warn" | "planned" | "missing";
 
-// "v pořádku" (splněno včas) budeme umět rozlišit, až budeme mít z PDF protokolů
-// informaci, že revize skutečně proběhla – do té doby řádek buď hoří (po termínu),
-// blíží se, je jen naplánovaný do budoucna, nebo mu chybí termín a čeká na doplnění.
+// Řádek buď hoří (po termínu), blíží se, je jen naplánovaný do budoucna, nebo
+// mu chybí termín a čeká na doplnění. Jestli byla POSLEDNÍ revize splněna
+// včas, je nezávislá historická informace (posledniRevizeVcas) z revizní
+// zprávy, ne aktuální stav řádku.
 const STATUS_META: Record<RowStatus, { label: string; border: string; text: string }> = {
   overdue: { label: "Po termínu", border: "border-status-overdue", text: "text-status-overdue" },
   warn: { label: "Blíží se", border: "border-status-warn", text: "text-status-warn" },
@@ -53,20 +58,40 @@ function computeStatus(termin: Date | null, startOfToday: Date, warnUntil: Date)
 
 // Filtr tabulky "Přehled zařízení" ovládaný kliknutím na statistické karty
 // (a na tlačítko "Nutno doplnit data") – "all" = žádný filtr, výchozí stav.
-type ActiveFilter = "all" | "warn" | "overdue" | "missing";
+type ActiveFilter = "all" | "warn" | "overdue" | "missing" | "vcas";
 
 const FILTER_LABELS: Record<ActiveFilter, string> = {
   all: "Všechny záznamy",
   warn: "Blíží se termín",
   overdue: "Po termínu",
   missing: "Nutno doplnit data",
+  vcas: "Splněno včas",
 };
+
+// Case-insensitive a na diakritice nezávislé porovnání pro fulltextové hledání.
+function normalizeSearchText(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+/** Krátký popis aktivního filtru (kategorie karty + text hledání) pro banner a prázdný stav. */
+function describeActiveFilter(filter: ActiveFilter, search: string): string | null {
+  const parts: string[] = [];
+  if (filter !== "all") parts.push(FILTER_LABELS[filter]);
+  if (search) parts.push(`hledání „${search}“`);
+  return parts.length > 0 ? parts.join(" + ") : null;
+}
 
 type DashboardStats = {
   total: number;
   warn: number;
   overdue: number;
   missingTermin: number;
+  /** Kolik záznamů má poslední revizi spárovanou a splněnou včas / se zpožděním. */
+  vcasCount: number;
+  pozdeCount: number;
 };
 
 type DashboardData = {
@@ -95,17 +120,20 @@ function useDashboardData() {
         const startOfTodayTs = Timestamp.fromDate(startOfToday);
         const warnUntilTs = Timestamp.fromDate(warnUntil);
 
-        const [totalSnap, overdueSnap, warnSnap, missingSnap, tableSnap] = await Promise.all([
-          getCountFromServer(col),
-          getCountFromServer(query(col, where("termin", "<", startOfTodayTs))),
-          getCountFromServer(
-            query(col, where("termin", ">=", startOfTodayTs), where("termin", "<=", warnUntilTs))
-          ),
-          getCountFromServer(query(col, where("stav", "==", MISSING_TERMIN_STAV))),
-          // Firestore řadí null před ostatními hodnotami, takže záznamy bez
-          // termínu (stav "chybi_termin") vyjdou v tomto seřazení první.
-          getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
-        ]);
+        const [totalSnap, overdueSnap, warnSnap, missingSnap, vcasSnap, pozdeSnap, tableSnap] =
+          await Promise.all([
+            getCountFromServer(col),
+            getCountFromServer(query(col, where("termin", "<", startOfTodayTs))),
+            getCountFromServer(
+              query(col, where("termin", ">=", startOfTodayTs), where("termin", "<=", warnUntilTs))
+            ),
+            getCountFromServer(query(col, where("stav", "==", MISSING_TERMIN_STAV))),
+            getCountFromServer(query(col, where("posledni_revize_vcas", "==", true))),
+            getCountFromServer(query(col, where("posledni_revize_vcas", "==", false))),
+            // Firestore řadí null před ostatními hodnotami, takže záznamy bez
+            // termínu (stav "chybi_termin") vyjdou v tomto seřazení první.
+            getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
+          ]);
 
         if (cancelled) return;
 
@@ -117,6 +145,12 @@ function useDashboardData() {
             popis: typeof record.popis === "string" ? record.popis : "",
             termin: record.termin instanceof Timestamp ? record.termin.toDate() : null,
             stav: typeof record.stav === "string" ? record.stav : "",
+            posledniRevizeVcas:
+              typeof record.posledni_revize_vcas === "boolean" ? record.posledni_revize_vcas : null,
+            posledniRevizniZpravaUrl:
+              typeof record.posledni_revizni_zprava_url === "string"
+                ? record.posledni_revizni_zprava_url
+                : null,
           };
         });
 
@@ -126,6 +160,8 @@ function useDashboardData() {
             overdue: overdueSnap.data().count,
             warn: warnSnap.data().count,
             missingTermin: missingSnap.data().count,
+            vcasCount: vcasSnap.data().count,
+            pozdeCount: pozdeSnap.data().count,
           },
           rows,
         });
@@ -154,11 +190,19 @@ function useDashboardData() {
 function DashboardOverview() {
   const { data, error, loading } = useDashboardData();
   const [filter, setFilter] = useState<ActiveFilter>("all");
+  const [searchText, setSearchText] = useState("");
+  const trimmedSearch = searchText.trim();
+  const searchNeedle = trimmedSearch ? normalizeSearchText(trimmedSearch) : "";
+  const activeDescription = describeActiveFilter(filter, trimmedSearch);
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const warnUntil = new Date(startOfToday);
   warnUntil.setDate(warnUntil.getDate() + WARN_DAYS);
+
+  const vcasCount = data?.stats.vcasCount ?? 0;
+  const vcasEvaluated = data ? data.stats.vcasCount + data.stats.pozdeCount : 0;
+  const vcasPercent = vcasEvaluated > 0 ? Math.round((vcasCount / vcasEvaluated) * 100) : 0;
 
   const stats: {
     label: string;
@@ -190,10 +234,10 @@ function DashboardOverview() {
     },
     {
       label: "Splněno včas",
-      value: "—",
-      note: "zatím žádná data",
+      value: vcasEvaluated > 0 ? `${vcasPercent}%` : "—",
+      note: vcasEvaluated > 0 ? `${vcasCount}/${vcasEvaluated} revizí` : "zatím žádná data",
       color: "border-status-ok text-status-ok",
-      filterValue: null,
+      filterValue: vcasEvaluated > 0 ? "vcas" : null,
     },
   ];
 
@@ -257,14 +301,30 @@ function DashboardOverview() {
             Nutno doplnit data ({data.stats.missingTermin})
           </button>
         )}
+
+        <input
+          type="text"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          placeholder="Hledat podle čísla zařízení nebo popisu…"
+          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-[13px] outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:ml-auto sm:w-72"
+        />
       </div>
 
       {(() => {
         const visibleRows = data
-          ? data.rows.filter((row) => {
-              if (filter === "all") return true;
-              return computeStatus(row.termin, startOfToday, warnUntil) === filter;
-            })
+          ? data.rows
+              .filter((row) => {
+                if (filter === "all") return true;
+                if (filter === "vcas") return row.posledniRevizeVcas === true;
+                return computeStatus(row.termin, startOfToday, warnUntil) === filter;
+              })
+              .filter(
+                (row) =>
+                  !searchNeedle ||
+                  normalizeSearchText(row.cislo_zarizeni).includes(searchNeedle) ||
+                  normalizeSearchText(row.popis).includes(searchNeedle)
+              )
           : [];
 
         return (
@@ -276,14 +336,17 @@ function DashboardOverview() {
               </span>
             </div>
 
-            {data && filter !== "all" && (
+            {data && activeDescription && (
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50 px-[18px] py-2 text-[12px] text-gray-600">
                 <span>
-                  Zobrazeno: <span className="font-semibold">{FILTER_LABELS[filter]}</span> (
+                  Zobrazeno: <span className="font-semibold">{activeDescription}</span> (
                   {visibleRows.length} záznamů)
                 </span>
                 <button
-                  onClick={() => setFilter("all")}
+                  onClick={() => {
+                    setFilter("all");
+                    setSearchText("");
+                  }}
                   className="font-semibold text-navy underline-offset-2 hover:underline"
                 >
                   Zobrazit vše
@@ -299,9 +362,9 @@ function DashboardOverview() {
 
             {!loading && data && visibleRows.length === 0 && (
               <div className="px-[18px] py-10 text-center text-[13px] text-gray-400">
-                {filter === "all"
-                  ? "Zatím žádná zařízení. Jakmile přidáme nahrávání .xls plánu a PDF protokolů, zobrazí se zde přehled revizí."
-                  : `Žádné záznamy pro filtr „${FILTER_LABELS[filter]}“.`}
+                {activeDescription
+                  ? `Žádné záznamy pro: ${activeDescription}.`
+                  : "Zatím žádná zařízení. Nahraj plán revizí (.xls) v záložce „Nahrát dokumenty“, ať se tu objeví přehled."}
               </div>
             )}
 
@@ -334,7 +397,33 @@ function DashboardOverview() {
                               <span className="text-status-missing">chybí termín</span>
                             )}
                           </td>
-                          <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>{meta.label}</td>
+                          <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>
+                            {meta.label}
+                            {row.posledniRevizniZpravaUrl && (
+                              <a
+                                href={row.posledniRevizniZpravaUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="Otevřít revizní zprávu (PDF)"
+                                className="ml-2 inline-flex items-center gap-1 rounded-full border border-status-ok px-2 py-0.5 align-middle text-[10px] font-semibold text-status-ok hover:bg-green-50"
+                              >
+                                <svg
+                                  width="11"
+                                  height="11"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                  <path d="M14 2v6h6" />
+                                </svg>
+                                Revizní zpráva
+                              </a>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
