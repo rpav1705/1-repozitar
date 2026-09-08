@@ -375,7 +375,7 @@ function DashboardOverview() {
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-2 pl-[18px] pr-4 font-semibold">Číslo zařízení</th>
                       <th className="py-2 pr-4 font-semibold">Popis</th>
-                      <th className="py-2 pr-4 font-semibold">Nejbližší termín</th>
+                      <th className="py-2 pr-4 font-semibold">Revize platná do:</th>
                       <th className="py-2 pr-[18px] font-semibold">Stav</th>
                     </tr>
                   </thead>
