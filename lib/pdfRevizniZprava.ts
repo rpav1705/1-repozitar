@@ -7,6 +7,10 @@ export type ParsedRevizniZprava = {
   novy_termin: Date;
   /** "Vyhovuje" / "Nevyhovuje" apod. – prázdné, pokud se nepodařilo rozpoznat. */
   celkove_hodnoceni: string;
+  /** Jméno revizního technika – null, pokud se nepodařilo rozpoznat (nekritické pole). */
+  technik_jmeno: string | null;
+  /** Evidenční číslo oprávnění revizního technika – null, pokud se nepodařilo rozpoznat. */
+  technik_cislo_opravneni: string | null;
   /** 1-based číslo stránky uvnitř nahraného PDF. */
   stranka: number;
 };
@@ -150,6 +154,38 @@ function extractTerminSpotrebic(lines: string[]): Date | null {
 }
 
 /**
+ * Jméno technika je na řádku HNED POD popiskem "Revizi provedl a protokol
+ * vystavil:" – v pravém sloupci (vlevo na tom řádku bývá adresa dodavatele,
+ * ta k technikovi nepatří). Řádek rozdělíme podle 2+ mezer (tak jsou sloupce
+ * oddělené i po reconstructLines) a vezmeme poslední neprázdný sloupec.
+ */
+function extractTechnikJmenoSpotrebic(lines: string[]): string | null {
+  const idx = lines.findIndex((l) => /Revizi provedl a protokol vystavil:/.test(l));
+  const nextLine = idx !== -1 ? lines[idx + 1] : undefined;
+  if (!nextLine) return null;
+  const columns = nextLine.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean);
+  return columns.length > 0 ? columns[columns.length - 1] : null;
+}
+
+/**
+ * Číslo oprávnění bývá na řádku s "Ev. číslo:" – hodnota samotná je uvedená
+ * za posledním výskytem "č.:" (v ukázce zdvojeně "Ev. číslo: ev.č.: ...").
+ * Když se "č.:" na řádku nenajde, zkusíme jako zálohu text přímo za "Ev. číslo:".
+ */
+function extractCisloOpravneniSpotrebic(lines: string[]): string | null {
+  const line = lines.find((l) => /Ev\.?\s*číslo\s*:/i.test(l));
+  if (!line) return null;
+
+  const markerIdx = line.lastIndexOf("č.:");
+  if (markerIdx !== -1) {
+    const value = line.slice(markerIdx + "č.:".length).trim();
+    if (value) return value;
+  }
+
+  return findValueAfterLabel([line], /Ev\.?\s*číslo\s*:\s*(.+)/i);
+}
+
+/**
  * "Celkové hodnocení:" bývá v záhlaví dvouřádkově – na řádku s popiskem
  * někdy nic nenásleduje a samotná hodnota ("Vyhovuje") je až na dalším
  * řádku za podtitulkem "dle ČSN 33 1600 ed.2" (ověřeno na reálné zprávě).
@@ -177,6 +213,8 @@ function extractSpotrebicZprava(lines: string[]) {
     datum_provedeni: extractDatumProvedeniSpotrebic(lines),
     novy_termin: extractTerminSpotrebic(lines),
     celkove_hodnoceni: extractCelkoveHodnoceniSpotrebic(lines),
+    technik_jmeno: extractTechnikJmenoSpotrebic(lines),
+    technik_cislo_opravneni: extractCisloOpravneniSpotrebic(lines),
   };
 }
 
@@ -235,6 +273,20 @@ function extractTerminStroj(lines: string[]): Date | null {
 }
 
 /**
+ * Jméno technika i číslo oprávnění jsou tu jednoduché popisky přímo na řádku
+ * (na rozdíl od šablony A) – "- jméno:  David Kadlec  Datum revize:" a
+ * "- ev. číslo:  2578/24/R-EZ-E1A,E1B" na řádku pod ním. Jméno končí buď
+ * 2+ mezerami (další sloupec / popisek), nebo koncem řádku.
+ */
+function extractTechnikJmenoStroj(lines: string[]): string | null {
+  return findValueAfterLabel(lines, /-\s*jméno:\s*([^\s]+(?:\s[^\s]+)*?)(?:\s{2,}|$)/);
+}
+
+function extractCisloOpravneniStroj(lines: string[]): string | null {
+  return findValueAfterLabel(lines, /-\s*ev\.\s*číslo:\s*(.+)/);
+}
+
+/**
  * "Celkový posudek:" je tu celý odstavec prózy, ne jedno slovo jako
  * "Vyhovuje" v šabloně A – bereme jen text na stejném řádku jako popisek
  * (typicky první věta), ať se do UI needitujeme vměstnávat celý odstavec.
@@ -251,6 +303,8 @@ function extractStrojZprava(lines: string[]) {
     datum_provedeni: extractDatumProvedeniStroj(lines),
     novy_termin: extractTerminStroj(lines),
     celkove_hodnoceni: extractPosudekStroj(lines),
+    technik_jmeno: extractTechnikJmenoStroj(lines),
+    technik_cislo_opravneni: extractCisloOpravneniStroj(lines),
   };
 }
 
@@ -320,6 +374,8 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
       datum_provedeni: extracted.datum_provedeni,
       novy_termin: extracted.novy_termin,
       celkove_hodnoceni: extracted.celkove_hodnoceni,
+      technik_jmeno: extracted.technik_jmeno,
+      technik_cislo_opravneni: extracted.technik_cislo_opravneni,
       stranka,
     });
   }

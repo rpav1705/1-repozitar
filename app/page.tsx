@@ -14,6 +14,7 @@ import {
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
+import { RevizniZpravaModal } from "@/components/RevizniZpravaModal";
 import { db } from "@/lib/firebase";
 
 const PLAN_COLLECTION = "planovane_revize";
@@ -34,6 +35,8 @@ type PlanRow = {
   posledniRevizeVcas: boolean | null;
   /** URL PDF poslední spárované revizní zprávy ve Firebase Storage, nebo null. */
   posledniRevizniZpravaUrl: string | null;
+  /** ID záznamu v kolekci "revizni_zpravy" – pro dotažení detailu do modálního okna. */
+  posledniRevizniZpravaId: string | null;
 };
 
 type RowStatus = "overdue" | "warn" | "planned" | "missing";
@@ -151,6 +154,10 @@ function useDashboardData() {
               typeof record.posledni_revizni_zprava_url === "string"
                 ? record.posledni_revizni_zprava_url
                 : null,
+            posledniRevizniZpravaId:
+              typeof record.posledni_revizni_zprava_id === "string"
+                ? record.posledni_revizni_zprava_id
+                : null,
           };
         });
 
@@ -191,6 +198,7 @@ function DashboardOverview() {
   const { data, error, loading } = useDashboardData();
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
+  const [openZprava, setOpenZprava] = useState<{ id: string; pdfUrl: string } | null>(null);
   const trimmedSearch = searchText.trim();
   const searchNeedle = trimmedSearch ? normalizeSearchText(trimmedSearch) : "";
   const activeDescription = describeActiveFilter(filter, trimmedSearch);
@@ -399,12 +407,16 @@ function DashboardOverview() {
                           </td>
                           <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>
                             {meta.label}
-                            {row.posledniRevizniZpravaUrl && (
-                              <a
-                                href={row.posledniRevizniZpravaUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                title="Otevřít revizní zprávu (PDF)"
+                            {row.posledniRevizniZpravaUrl && row.posledniRevizniZpravaId && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setOpenZprava({
+                                    id: row.posledniRevizniZpravaId as string,
+                                    pdfUrl: row.posledniRevizniZpravaUrl as string,
+                                  })
+                                }
+                                title="Zobrazit detail revizní zprávy"
                                 className="ml-2 inline-flex items-center gap-1 rounded-full border border-status-ok px-2 py-0.5 align-middle text-[10px] font-semibold text-status-ok hover:bg-green-50"
                               >
                                 <svg
@@ -421,7 +433,7 @@ function DashboardOverview() {
                                   <path d="M14 2v6h6" />
                                 </svg>
                                 Revizní zpráva
-                              </a>
+                              </button>
                             )}
                           </td>
                         </tr>
@@ -440,6 +452,14 @@ function DashboardOverview() {
           </div>
         );
       })()}
+
+      {openZprava && (
+        <RevizniZpravaModal
+          zpravaId={openZprava.id}
+          pdfUrl={openZprava.pdfUrl}
+          onClose={() => setOpenZprava(null)}
+        />
+      )}
     </>
   );
 }

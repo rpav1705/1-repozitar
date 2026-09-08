@@ -278,6 +278,8 @@ type ProcessedZprava = {
   datum_provedeni: Date;
   novy_termin: Date;
   celkove_hodnoceni: string;
+  technik_jmeno: string | null;
+  technik_cislo_opravneni: string | null;
   parovani_stav: ParovaniStav;
   posledni_revize_vcas: boolean | null;
   /**
@@ -374,6 +376,8 @@ function RevizniZpravyUpload() {
               datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
               novy_termin: Timestamp.fromDate(zprava.novy_termin),
               celkove_hodnoceni: zprava.celkove_hodnoceni,
+              technik_jmeno: zprava.technik_jmeno,
+              technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               stranka: zprava.stranka,
               soubor_nazev: file.name,
               pdf_storage_path: storagePath,
@@ -409,6 +413,8 @@ function RevizniZpravyUpload() {
               datum_provedeni: zprava.datum_provedeni,
               novy_termin: zprava.novy_termin,
               celkove_hodnoceni: zprava.celkove_hodnoceni,
+              technik_jmeno: zprava.technik_jmeno,
+              technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               parovani_stav,
               posledni_revize_vcas,
               overenyTerminVPlanu,
@@ -515,6 +521,8 @@ function RevizniZpravyUpload() {
                       <th className="py-1.5 pr-4 font-semibold">Provedeno</th>
                       <th className="py-1.5 pr-4 font-semibold">Nový termín</th>
                       <th className="py-1.5 pr-4 font-semibold">Hodnocení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Technik</th>
+                      <th className="py-1.5 pr-4 font-semibold">Číslo oprávnění</th>
                       <th className="py-1.5 pr-4 font-semibold">Párování</th>
                       <th className="py-1.5 pr-4 font-semibold">Termín v plánu (ověřeno)</th>
                     </tr>
@@ -531,6 +539,8 @@ function RevizniZpravyUpload() {
                         <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ")}</td>
                         <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ")}</td>
                         <td className="py-1.5 pr-4">{p.celkove_hodnoceni || "—"}</td>
+                        <td className="py-1.5 pr-4">{p.technik_jmeno || "—"}</td>
+                        <td className="py-1.5 pr-4">{p.technik_cislo_opravneni || "—"}</td>
                         <td className={`py-1.5 pr-4 font-semibold ${PAROVANI_LABELS[p.parovani_stav].className}`}>
                           {PAROVANI_LABELS[p.parovani_stav].label}
                         </td>
