@@ -43,6 +43,8 @@ function PlanUpload() {
   const [error, setError] = useState("");
   const [savedCount, setSavedCount] = useState(0);
 
+  const missingTerminCount = rows.filter((row) => !row.termin).length;
+
   const handleParse = async () => {
     if (!file) return;
     setStatus("parsing");
@@ -80,11 +82,13 @@ function PlanUpload() {
           batch.set(ref, {
             cislo_zarizeni: row.cislo_zarizeni,
             popis: row.popis,
-            termin: Timestamp.fromDate(row.termin),
+            termin: row.termin ? Timestamp.fromDate(row.termin) : null,
             frekvence: row.frekvence,
             jednotky_frekvence: row.jednotky_frekvence,
             pu: row.pu,
-            stav: "cekajici",
+            // Chybějící termín se neztrácí zahozením řádku, ale označením stavu –
+            // je potřeba ho ručně doplnit (viz "Nutno doplnit data" na dashboardu).
+            stav: row.termin ? "cekajici" : "chybi_termin",
           });
         });
         await batch.commit();
@@ -108,7 +112,10 @@ function PlanUpload() {
           Nahraj export plánu revizí (obdoba exportu z Maxima) se sloupci pro číslo zařízení/aktiva,
           popis a termín &bdquo;Předpokládané dokončení&ldquo;. Záznamy se uloží do kolekce{" "}
           <code className="rounded bg-gray-100 px-1 py-0.5">planovane_revize</code> se stavem{" "}
-          <code className="rounded bg-gray-100 px-1 py-0.5">cekajici</code>.
+          <code className="rounded bg-gray-100 px-1 py-0.5">cekajici</code>. Řádky, u kterých se
+          nepodaří rozpoznat termín, se uloží taky – se stavem{" "}
+          <code className="rounded bg-gray-100 px-1 py-0.5">chybi_termin</code>, ať se dají dohledat
+          a ručně doplnit.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -152,8 +159,10 @@ function PlanUpload() {
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
               <span>
-                Nalezeno {rows.length} platných záznamů{" "}
-                {skipped.length > 0 && `(přeskočeno ${skipped.length})`}.
+                Nalezeno {rows.length} záznamů: {rows.length - missingTerminCount} v pořádku
+                {missingTerminCount > 0 &&
+                  `, ${missingTerminCount} bez termínu (budou uloženy, ale je potřeba je ručně doplnit)`}
+                {skipped.length > 0 && ` — přeskočeno ${skipped.length} prázdných řádků`}.
               </span>
               {status !== "saved" && (
                 <button
@@ -217,7 +226,13 @@ function PlanUpload() {
                       <tr key={i} className="border-b border-gray-100">
                         <td className="py-1.5 pr-4">{row.cislo_zarizeni}</td>
                         <td className="py-1.5 pr-4">{row.popis}</td>
-                        <td className="py-1.5 pr-4">{row.termin.toLocaleDateString("cs-CZ")}</td>
+                        <td className="py-1.5 pr-4">
+                          {row.termin ? (
+                            row.termin.toLocaleDateString("cs-CZ")
+                          ) : (
+                            <span className="font-semibold text-status-missing">chybí termín</span>
+                          )}
+                        </td>
                         <td className="py-1.5 pr-4">
                           {row.frekvence !== null
                             ? `${row.frekvence} ${row.jednotky_frekvence}`.trim()

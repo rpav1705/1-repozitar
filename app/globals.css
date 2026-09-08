@@ -12,6 +12,7 @@
   --color-status-warn: #f2760f;
   --color-status-overdue: #dc2626;
   --color-status-planned: #94a3b8;
+  --color-status-missing: #71717a;
 }
 
 @theme inline {
@@ -27,6 +28,7 @@
   --color-status-warn: var(--color-status-warn);
   --color-status-overdue: var(--color-status-overdue);
   --color-status-planned: var(--color-status-planned);
+  --color-status-missing: var(--color-status-missing);
 }
 
 @media (prefers-color-scheme: dark) {

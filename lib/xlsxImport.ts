@@ -5,7 +5,8 @@ import { extractEquipmentNumber } from "@/lib/extractEquipmentNumber";
 export type ParsedPlanRow = {
   cislo_zarizeni: string;
   popis: string;
-  termin: Date;
+  /** null, pokud se v souboru nepodařilo rozpoznat/naparsovat termín – řádek se přesto uloží. */
+  termin: Date | null;
   frekvence: number | null;
   jednotky_frekvence: string;
   /** Maximo PM číslo (sloupec "PÚ") – prázdné, pokud v souboru chybí. */
@@ -236,12 +237,14 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
     const jednotky_frekvence = frequencyUnitIndex >= 0 ? cellText(row[frequencyUnitIndex]) : "";
     const pu = puIndex >= 0 ? cellText(row[puIndex]) : "";
 
-    if (!cislo_zarizeni) {
-      skipped.push({ row: excelRowNumber, reason: "chybí číslo zařízení" });
-      return;
-    }
-    if (!termin) {
-      skipped.push({ row: excelRowNumber, reason: "nepodařilo se přečíst termín" });
+    // Chybějící termín (nebo jiný nerozpoznaný údaj) řádek nezahazuje – uloží se
+    // s tím, co se podařilo přečíst, a označí se stavem "chybi_termin" při
+    // zápisu do Firestore (viz handleSave v app/nahrat/page.tsx), ať uživatel
+    // o žádná data z importu nepřijde. Přeskočí se jen řádek, kde se nepodařilo
+    // rozpoznat vůbec nic (typicky prázdný/oddělovací řádek v exportu).
+    const isCompletelyEmpty = !cislo_zarizeni && !popis && !pu && !termin && frekvence === null;
+    if (isCompletelyEmpty) {
+      skipped.push({ row: excelRowNumber, reason: "prázdný řádek" });
       return;
     }
 
