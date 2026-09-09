@@ -514,13 +514,16 @@ function DashboardOverview() {
                           <td className="py-2 pr-4">{row.popis}</td>
                           <td className="py-2 pr-4">
                             {row.termin ? (
-                              row.termin.toLocaleDateString("cs-CZ")
+                              // timeZone: "UTC" – kalendářní datum bez času uložené přes Date.UTC()
+                              // (viz lib/parseDate.ts), zobrazit ve stejné zóně, jinak by ho
+                              // prohlížeč v jiné zóně mohl u půlnočních časů posunout o den.
+                              row.termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
                             ) : (
                               <span className="text-status-missing">chybí termín</span>
                             )}
                           </td>
                           <td className="py-2 pr-4">
-                            {row.datumProvedeni ? row.datumProvedeni.toLocaleDateString("cs-CZ") : "—"}
+                            {row.datumProvedeni ? row.datumProvedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" }) : "—"}
                           </td>
                           <td className="py-2 pr-4">{row.technikJmeno || "—"}</td>
                           <td className="py-2 pr-4">{row.technikCisloOpravneni || "—"}</td>
@@ -560,7 +563,7 @@ function DashboardOverview() {
                                 rel="noopener noreferrer"
                                 title={`Otevřít předchozí revizní zprávu (PDF)${
                                   row.predchoziDatumProvedeni
-                                    ? ` – provedeno ${row.predchoziDatumProvedeni.toLocaleDateString("cs-CZ")}`
+                                    ? ` – provedeno ${row.predchoziDatumProvedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}`
                                     : ""
                                 }`}
                                 className="ml-1.5 inline-flex items-center gap-1 rounded-full border border-gray-300 px-2 py-0.5 align-middle text-[10px] font-semibold text-gray-500 hover:bg-gray-100"

@@ -154,8 +154,12 @@ function findValueAfterLabel(lines: string[], labelPattern: RegExp): string | nu
 }
 
 /** "nejpozději do" -> konzervativně poslední den daného měsíce (den 0 následujícího měsíce). */
+// Date.UTC(), NE "new Date(rok, měsíc, den)" – viz vysvětlení u
+// parseFlexibleDate v lib/parseDate.ts (appka běží v prohlížeči i v Node
+// skriptu s různou časovou zónou, obyčejný Date konstruktor bez UTC by pro
+// stejné datum dal v každém prostředí jiný Timestamp).
 function lastDayOfMonth(year: number, month: number): Date {
-  return new Date(year, month, 0);
+  return new Date(Date.UTC(year, month, 0));
 }
 
 /** "1/27", "01/27" i "1/2027" (měsíc/rok, dvou- i čtyřciferný) -> poslední den daného měsíce. */
@@ -322,7 +326,8 @@ function parseDenMesicRok(raw: string): Date | null {
   const month = CZECH_MONTHS[match[2].toLowerCase()];
   const year = Number(match[3]);
   if (!month) return null;
-  const date = new Date(year, month - 1, day);
+  // Date.UTC() – viz vysvětlení u parseFlexibleDate v lib/parseDate.ts.
+  const date = new Date(Date.UTC(year, month - 1, day));
   return isNaN(date.getTime()) ? null : date;
 }
 

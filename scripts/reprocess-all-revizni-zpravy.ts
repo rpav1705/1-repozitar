@@ -50,6 +50,12 @@
  *      (přesně tenhle název/vzor je v .gitignore, takže se nikdy neco commitne).
  *   3. export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/service-account-key.json"
  *   4. npm run reprocess-all   (nebo přímo: npx tsx scripts/reprocess-all-revizni-zpravy.ts)
+ *
+ * REPROCESS_INCLUDE_HISTORII=1 npm run reprocess-all – jednorázový režim,
+ * který přeparsuje ÚPLNĚ VŠECHNY uložené zprávy (i historické/starší, ne
+ * jen aktuální za každé zařízení). Použij po opravě, která mění, jak appka
+ * data počítá (typicky časová zóna v datu provedení, viz lib/parseDate.ts),
+ * ať se opravená logika projeví i na už dřív uložených historických datech.
  */
 
 import { initializeApp, applicationDefault } from "firebase-admin/app";
@@ -315,11 +321,21 @@ function poslednUpravaMillis(data: FirebaseFirestore.DocumentData): number {
   return kandidati.length > 0 ? Math.max(...kandidati) : -Infinity;
 }
 
+/**
+ * Zrcadlí kalendarniDenUTC v lib/revizniZpravyHistorie.ts – kalendářní den v
+ * UTC, ne přesná shoda Timestampu (viz vysvětlení tam a u parseFlexibleDate
+ * v lib/parseDate.ts: appka v prohlížeči i tenhle Node skript dřív pro
+ * STEJNÉ nominální datum ukládaly Timestampy hodinu od sebe).
+ */
+function kalendarniDenUTC(datum: Date): number {
+  return Date.UTC(datum.getUTCFullYear(), datum.getUTCMonth(), datum.getUTCDate());
+}
+
 /** Zrcadlí slouzDuplicity v lib/revizniZpravyHistorie.ts. */
 function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[] } {
   const podleData = new Map<number, Radek[]>();
   for (const radek of radky) {
-    const klic = radek.datumProvedeni.getTime();
+    const klic = kalendarniDenUTC(radek.datumProvedeni);
     const skupina = podleData.get(klic) ?? [];
     skupina.push(radek);
     podleData.set(klic, skupina);
@@ -470,11 +486,23 @@ async function main() {
   const db = initFirebase();
   const bucket = getStorage().bucket();
 
+  // Normálně appka (tlačítko i tenhle skript) přeparsovává jen AKTUÁLNÍ
+  // (nejnovější) zprávu za každé zařízení – historické/starší zprávy se
+  // znovu nestahují, viz komentář u vyberAktualniZpravy. REPROCESS_INCLUDE_HISTORII=1
+  // tenhle filtr přeskočí a projde ÚPLNĚ VŠECHNY uložené zprávy (i historické) –
+  // použij to jen jednorázově po opravě, která mění, jak appka data/ID
+  // počítá (např. oprava časové zóny v datu provedení, viz lib/parseDate.ts),
+  // ať se historická data přepočítají/normalizují nově opravenou logikou
+  // všude, ne jen u zrovna aktuálních zpráv.
+  const zahrnoutHistorii = process.env.REPROCESS_INCLUDE_HISTORII === "1";
+
   console.log("Načítám seznam uložených revizních zpráv…");
   const snap = await db.collection(REVIZNI_ZPRAVY_COLLECTION).get();
-  const aktualni = vyberAktualniZpravy(snap.docs);
+  const aktualni = zahrnoutHistorii ? snap.docs : vyberAktualniZpravy(snap.docs);
   console.log(
-    `Nalezeno ${snap.docs.length} záznamů celkem, z toho ${aktualni.length} aktuálních (po jedné na zařízení).`
+    zahrnoutHistorii
+      ? `Nalezeno ${snap.docs.length} záznamů celkem – REPROCESS_INCLUDE_HISTORII=1, zpracují se VŠECHNY (i historické).`
+      : `Nalezeno ${snap.docs.length} záznamů celkem, z toho ${aktualni.length} aktuálních (po jedné na zařízení).`
   );
 
   const groups = new Map<string, QueryDocumentSnapshot[]>();

@@ -51,6 +51,21 @@ function poslednUpravaMillis(data: DocumentData): number {
 }
 
 /**
+ * Klíč pro porovnání "stejného data provedení" v slouzDuplicity – kalendářní
+ * den v UTC, NE přesná shoda Timestampu (.getTime()). Appka dřív porovnávala
+ * přesně a duplicity to nezachytilo, když datum_provedeni vzniklo v jiné
+ * časové zóně (viz vysvětlení u parseFlexibleDate v lib/parseDate.ts): appka
+ * běžící v prohlížeči (Europe/Prague) i appka běžící v Node skriptu (UTC)
+ * dřív pro STEJNÉ "13.03.2026" ukládaly dva Timestampy hodinu od sebe, což
+ * .getTime() vyhodnotil jako dvě různé revize. Porovnání podle kalendářního
+ * dne je vůči tomuhle rozdílu odolné, i kdyby se v datech ještě objevil
+ * nějaký starší záznam z doby před opravou parseFlexibleDate.
+ */
+function kalendarniDenUTC(datum: Date): number {
+  return Date.UTC(datum.getUTCFullYear(), datum.getUTCMonth(), datum.getUTCDate());
+}
+
+/**
  * Sloučí záznamy se STEJNÝM datem provedení (duplicity – ať vznikly
  * duplicitním nahráním/zpracováním stejné revize před zavedením stabilního
  * ID zápisu v revizni_zpravy, viz revizniZpravaDocId, nebo jakkoli jinak) do
@@ -62,7 +77,7 @@ function poslednUpravaMillis(data: DocumentData): number {
 function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[] } {
   const podleData = new Map<number, Radek[]>();
   for (const radek of radky) {
-    const klic = radek.datumProvedeni.getTime();
+    const klic = kalendarniDenUTC(radek.datumProvedeni);
     const skupina = podleData.get(klic) ?? [];
     skupina.push(radek);
     podleData.set(klic, skupina);

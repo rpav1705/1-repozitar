@@ -331,7 +331,11 @@ function PlanUpload() {
                         <td className="py-1.5 pr-4">{row.popis}</td>
                         <td className="py-1.5 pr-4">
                           {row.termin ? (
-                            row.termin.toLocaleDateString("cs-CZ")
+                            // timeZone: "UTC" – termin/datum_provedeni jsou kalendářní data bez
+                            // času, uložená přes Date.UTC() (viz lib/parseDate.ts). Bez explicitní
+                            // UTC zóny by je prohlížeč zobrazil v ZÓNĚ PROHLÍŽEČE a mohl by (u
+                            // časů blízko půlnoci) ukázat jiný den, než appka jinde uloží/porovnává.
+                            row.termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
                           ) : (
                             <span className="font-semibold text-status-missing">chybí termín</span>
                           )}
@@ -643,8 +647,8 @@ function RevizniZpravyUpload() {
                       return (
                       <tr key={i} className="border-b border-gray-100">
                         <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
-                        <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ")}</td>
-                        <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ")}</td>
+                        <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
+                        <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
                         <td className="py-1.5 pr-4">{p.celkove_hodnoceni || "—"}</td>
                         <td className="py-1.5 pr-4">{p.technik_jmeno || "—"}</td>
                         <td className="py-1.5 pr-4">{p.technik_cislo_opravneni || "—"}</td>
@@ -655,7 +659,7 @@ function RevizniZpravyUpload() {
                           {p.parovani_stav !== "shoda"
                             ? "—"
                             : p.overenyTerminVPlanu
-                              ? p.overenyTerminVPlanu.toLocaleDateString("cs-CZ")
+                              ? p.overenyTerminVPlanu.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
                               : "chybí i po zápisu!"}
                           {!terminSedi && " (neshoduje se s novým termínem výše)"}
                         </td>

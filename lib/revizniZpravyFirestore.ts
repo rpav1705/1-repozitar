@@ -52,21 +52,27 @@ export function sanitizeDocId(raw: string): string {
 
 /**
  * Stabilní ID dokumentu v "revizni_zpravy", odvozené z čísla zařízení a
- * (lokálního kalendářního) data provedení revize – umožňuje appce zapisovat
- * přes setDoc místo addDoc. Opakované nahrání/zpracování STEJNÉ revize
- * (stejné zařízení, stejné datum provedení) tak vždy přepíše existující
- * záznam, místo aby vedle něj vytvořilo duplicitu s náhodným ID (přesně
- * tohle appka dřív dělala u addDoc – viz i dedup starších záznamů v
- * lib/revizniZpravyHistorie.ts, který existující duplicity z doby před
- * touhle opravou uklidí). Datum se čte z lokálních komponent (getFullYear/
- * getMonth/getDate), NE přes toISOString() – ten převádí do UTC a u času
- * blízko půlnoci by mohl posunout den jinam, než appka jinde datum zobrazuje.
+ * data provedení revize – umožňuje appce zapisovat přes setDoc místo addDoc.
+ * Opakované nahrání/zpracování STEJNÉ revize (stejné zařízení, stejné datum
+ * provedení) tak vždy přepíše existující záznam, místo aby vedle něj
+ * vytvořilo duplicitu s náhodným ID (přesně tohle appka dřív dělala u
+ * addDoc – viz i dedup starších záznamů v lib/revizniZpravyHistorie.ts,
+ * který existující duplicity z doby před touhle opravou uklidí).
+ *
+ * Datum se čte VÝHRADNĚ přes UTC komponenty (getUTCFullYear/getUTCMonth/
+ * getUTCDate), NE přes lokální getFullYear/getMonth/getDate – datumProvedeni
+ * sem přichází z parseFlexibleDate (lib/parseDate.ts), který ho od teď VŽDY
+ * skládá přes Date.UTC(). Čtení lokálními gettery by u appky běžící ve dvou
+ * různých časových zónách (prohlížeč Europe/Prague vs. Node skript v UTC)
+ * mohlo z JEDNOHO A TOHOŽ Timestampu vyčíst DVA RŮZNÉ kalendářní dny podle
+ * toho, kde kód zrovna běží – přesně tenhle nesoulad u zařízení 212261
+ * způsobil, že appka spočítala pro STEJNÉ nominální datum dvě různá ID.
  */
 export function revizniZpravaDocId(cisloZarizeni: string, datumProvedeni: Date): string {
   const cisloId = sanitizeDocId(cisloZarizeni);
   if (!cisloId) return "";
-  const rok = datumProvedeni.getFullYear();
-  const mesic = String(datumProvedeni.getMonth() + 1).padStart(2, "0");
-  const den = String(datumProvedeni.getDate()).padStart(2, "0");
+  const rok = datumProvedeni.getUTCFullYear();
+  const mesic = String(datumProvedeni.getUTCMonth() + 1).padStart(2, "0");
+  const den = String(datumProvedeni.getUTCDate()).padStart(2, "0");
   return `${cisloId}_${rok}-${mesic}-${den}`;
 }
