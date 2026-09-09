@@ -757,6 +757,23 @@ function jeZpracovanoReprocessem(d: QueryDocumentSnapshot<DocumentData>): boolea
 type ReprocessMod = "nove" | "vse";
 
 /**
+ * Modulová (ne komponentová) proměnná – běh handleReprocess je jen plain
+ * async funkce volaná z onClick, na React lifecycle komponenty NENÍ nijak
+ * vázaná. Když uživatel uvnitř appky přejde na jinou stránku (Next.js
+ * klientská navigace jen překreslí React strom, needělá full reload téhle
+ * karty prohlížeče), RevizniZpravyReprocess se odmountuje, ale rozdělaný
+ * handleReprocess doběhne dál na pozadí – jen ztratí spojení na setState
+ * (ty se stanou tichým no-opem). Modulová proměnná přežije tohle
+ * odmountování/zamountování, takže i nově zamountovaná komponenta (např.
+ * po návratu zpět na "/nahrat") pozná, že už něco běží, a nedovolí
+ * uživateli omylem spustit druhou souběžnou dávku ve stejné kartě
+ * prohlížeče. Chrání to JEN proti tomuhle scénáři – ne proti druhé
+ * otevřené kartě/oknu prohlížeči (tam je proměnná úplně nezávislá, viz
+ * varování v UI níž).
+ */
+let bezicíZpracovani: { rezim: ReprocessMod; zacatek: Date } | null = null;
+
+/**
  * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
  * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
  * jimi extrahovaná pole – ať uživatel nemusí soubory znovu ručně nahrávat
@@ -797,6 +814,12 @@ function RevizniZpravyReprocess() {
   const [pocetNove, setPocetNove] = useState<number | null>(null);
   const [pocetVse, setPocetVse] = useState<number | null>(null);
   const [pocetChyba, setPocetChyba] = useState("");
+  // Zachyceno při zamountování téhle komponenty – jestli tou dobou už
+  // bezicíZpracovani něco drželo, znamená to, že zpracování spustila dřívější
+  // (teď odmountovaná) instance téhle komponenty a stále běží na pozadí.
+  const [zablokovanoJinde] = useState<{ rezim: ReprocessMod; zacatek: Date } | null>(
+    () => bezicíZpracovani
+  );
 
   const nacistPocty = async () => {
     try {
@@ -820,6 +843,13 @@ function RevizniZpravyReprocess() {
   }, []);
 
   const handleReprocess = async (mod: ReprocessMod) => {
+    if (bezicíZpracovani) {
+      setError(
+        "Zpracování už běží (spuštěné odjinud – jinou kartou/oknem, nebo dřívější návštěvou téhle stránky). Počkej, až doběhne, případně načti stránku znovu."
+      );
+      return;
+    }
+
     setStatus("processing");
     setBezicíRezim(mod);
     setResults([]);
@@ -828,6 +858,7 @@ function RevizniZpravyReprocess() {
     setProgress({ done: 0, total: 0 });
     setPruneProgress({ done: 0, total: 0 });
 
+    bezicíZpracovani = { rezim: mod, zacatek: new Date() };
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
       const aktualni = vyberAktualniZpravy(snap.docs);
@@ -1002,6 +1033,8 @@ function RevizniZpravyReprocess() {
         err instanceof Error ? err.message : "Nepodařilo se načíst uložené revizní zprávy."
       );
       setStatus("idle");
+    } finally {
+      bezicíZpracovani = null;
     }
   };
 
@@ -1033,11 +1066,28 @@ function RevizniZpravyReprocess() {
           (např. po změně parsovací logiky) použij odkaz níž.
         </p>
 
+        {zablokovanoJinde && (
+          <p className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] text-status-warn">
+            Zpracování ({zablokovanoJinde.rezim === "vse" ? "úplně vše" : "jen nové"}, spuštěno{" "}
+            {zablokovanoJinde.zacatek.toLocaleTimeString("cs-CZ")}) už běží z dřívějšího otevření
+            téhle stránky a stále pokračuje na pozadí – jen se tu teď neukazuje průběh. Vyčkej,
+            nebo stránku načti znovu (F5), ať zjistíš aktuální stav.
+          </p>
+        )}
+
+        {status === "processing" && (
+          <p className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] text-status-warn">
+            Nezavírej tuhle kartu prohlížeče, dokud zpracování neskončí – zavřením karty (nebo
+            prohlížeče) se přeruší. Přechod na jinou stránku UVNITŘ appky zpracování nezastaví
+            (běží dál na pozadí), ale dokud se nevrátíš zpět na tuhle stránku, neuvidíš průběh.
+          </p>
+        )}
+
         <div className="flex flex-col items-start gap-2">
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={() => handleReprocess("nove")}
-              disabled={status === "processing"}
+              disabled={status === "processing" || zablokovanoJinde !== null}
               className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {status === "processing" && bezicíRezim === "nove" && pruneProgress.total > 0
@@ -1060,7 +1110,7 @@ function RevizniZpravyReprocess() {
                   handleReprocess("vse");
                 }
               }}
-              disabled={status === "processing" || pocetVse === null}
+              disabled={status === "processing" || zablokovanoJinde !== null || pocetVse === null}
               title="Ignoruje, které zprávy už byly zpracované, a přepočítá úplně všechny."
               className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
