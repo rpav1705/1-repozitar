@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
@@ -667,6 +667,29 @@ function RevizniZpravyReprocess() {
   const [error, setError] = useState("");
   const [pruneSouhrn, setPruneSouhrn] = useState<PruneSouhrn | null>(null);
   const [pruneProgress, setPruneProgress] = useState({ done: 0, total: 0 });
+  // Kolik zpráv by teď tlačítko zpracovalo – null = ještě se nezjistilo
+  // (počáteční načítání) nebo se zjistit nepodařilo.
+  const [pocetKeZpracovani, setPocetKeZpracovani] = useState<number | null>(null);
+  const [pocetChyba, setPocetChyba] = useState("");
+
+  const nacistPocetKeZpracovani = async () => {
+    try {
+      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      setPocetKeZpracovani(vyberAktualniZpravy(snap.docs).length);
+      setPocetChyba("");
+    } catch (err) {
+      setPocetChyba(
+        err instanceof Error ? err.message : "Nepodařilo se zjistit počet zpráv ke zpracování."
+      );
+    }
+  };
+
+  // Zjištění počtu se stejnou logikou (vyberAktualniZpravy), jakou pak
+  // použije samotné zpracování – ať se číslo u tlačítka shoduje s tím, co
+  // appka po kliknutí skutečně stáhne a naparsuje.
+  useEffect(() => {
+    nacistPocetKeZpracovani();
+  }, []);
 
   const handleReprocess = async () => {
     setStatus("processing");
@@ -837,6 +860,9 @@ function RevizniZpravyReprocess() {
       setPruneSouhrn(souhrn);
 
       setStatus("done");
+      // Prořezání (a případné mezitím nahrané nové zprávy) mohlo počet
+      // aktuálních zpráv změnit – ať číslo u tlačítka po dokončení sedí.
+      await nacistPocetKeZpracovani();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Nepodařilo se načíst uložené revizní zprávy."
@@ -866,7 +892,7 @@ function RevizniZpravyReprocess() {
           (podle data provedení) – starší smaže i s PDF ve Storage.
         </p>
 
-        <div>
+        <div className="flex flex-col items-start gap-1.5">
           <button
             onClick={handleReprocess}
             disabled={status === "processing"}
@@ -876,8 +902,20 @@ function RevizniZpravyReprocess() {
               ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
               : status === "processing"
                 ? `Zpracovávám… (${progress.done}/${progress.total})`
-                : "Znovu zpracovat uložené revizní zprávy"}
+                : pocetKeZpracovani !== null
+                  ? `Zpracovat ${pocetKeZpracovani} uložených revizních zpráv`
+                  : "Znovu zpracovat uložené revizní zprávy"}
           </button>
+          {status !== "processing" &&
+            (pocetChyba ? (
+              <p className="text-[11px] text-red-500">{pocetChyba}</p>
+            ) : (
+              <p className="text-[11px] text-gray-400">
+                {pocetKeZpracovani !== null
+                  ? `Ke zpracování: ${pocetKeZpracovani} revizních zpráv (jen aktuální/nejnovější u každého zařízení, starší historické se nepočítají).`
+                  : "Zjišťuji počet zpráv ke zpracování…"}
+              </p>
+            ))}
         </div>
 
         {error && <p className="text-[12.5px] text-red-600">{error}</p>}
