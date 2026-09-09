@@ -422,60 +422,76 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
   // téhož souboru do Firebase Storage volajícím kódem) by pak spadlo na
   // "Cannot perform Construct on a detached ArrayBuffer". Voláme proto na
   // nezávislé kopii, ať buffer volajícího zůstane použitelný i po návratu.
-  const doc = await pdfjsLib.getDocument({ data: data.slice(0) }).promise;
-  const zpravy: ParsedRevizniZprava[] = [];
-  const preskoceno: SkippedPage[] = [];
+  // KRITICKÉ: getDocument() bez explicitního "worker" parametru si při KAŽDÉM
+  // volání vytvoří VLASTNÍ nový PDFWorker (v prohlížeči = nové vlákno Web
+  // Workeru se svou vlastní JS haldou, viz PDFWorker.create() v pdf.mjs) a ten
+  // worker (spolu s dekódovanými daty stránek/fontů, které si drží) se uvolní
+  // JEN voláním loadingTask.destroy() – appka ho dřív nikde nevolala (destroy
+  // je na "loading tasku" vráceném ze samotného getDocument(), NE na
+  // vyřešeném PDFDocumentProxy z .promise). U dávek stovek až tisíc souborů
+  // (typicky přes RevizniZpravyReprocess) tak appce v paměti zůstávaly viset
+  // stovky až tisíce nikdy neuklizených workerů = reálně pozorovaný růst
+  // spotřeby paměti karty do jednotek GB. finally zajistí úklid i když
+  // parsování/getPage někde uprostřed spadne.
+  const loadingTask = pdfjsLib.getDocument({ data: data.slice(0) });
+  try {
+    const doc = await loadingTask.promise;
+    const zpravy: ParsedRevizniZprava[] = [];
+    const preskoceno: SkippedPage[] = [];
 
-  for (let stranka = 1; stranka <= doc.numPages; stranka++) {
-    // getPage/getTextContent samotné běží ve web workeru pdf.js (mimo hlavní
-    // vlákno), ale reconstructLines/regexové extrakce níž už běží tady na
-    // hlavním vlákně appky – u souboru s hodně stránkami (víc revizních zpráv
-    // v jednom PDF, jedna na stránku) by se bez týhle pauzy mohly zřetězit
-    // za sebou bez jediné šance na vykreslení/uživatelský vstup.
-    if (stranka > 1 && stranka % 5 === 0) {
-      await yieldToMainThread();
+    for (let stranka = 1; stranka <= doc.numPages; stranka++) {
+      // getPage/getTextContent samotné běží ve web workeru pdf.js (mimo hlavní
+      // vlákno), ale reconstructLines/regexové extrakce níž už běží tady na
+      // hlavním vlákně appky – u souboru s hodně stránkami (víc revizních zpráv
+      // v jednom PDF, jedna na stránku) by se bez týhle pauzy mohly zřetězit
+      // za sebou bez jediné šance na vykreslení/uživatelský vstup.
+      if (stranka > 1 && stranka % 5 === 0) {
+        await yieldToMainThread();
+      }
+
+      const page = await doc.getPage(stranka);
+      const content = await page.getTextContent();
+      const lines = reconstructLines(content.items);
+
+      const sablona = detectSablona(lines);
+      if (!sablona) {
+        preskoceno.push({ stranka, duvod: "nerozpoznaný typ revizní zprávy" });
+        continue;
+      }
+
+      const extracted = sablona === "spotrebic" ? extractSpotrebicZprava(lines) : extractStrojZprava(lines);
+      const sablonaPopis = sablona === "spotrebic" ? "spotřebič" : "pracovní stroj";
+
+      if (!extracted.cislo_zarizeni) {
+        preskoceno.push({ stranka, duvod: `nepodařilo se najít Inventární číslo (šablona: ${sablonaPopis})` });
+        continue;
+      }
+
+      if (!extracted.datum_provedeni) {
+        preskoceno.push({ stranka, duvod: `nepodařilo se najít datum provedení revize (šablona: ${sablonaPopis})` });
+        continue;
+      }
+
+      if (!extracted.novy_termin) {
+        preskoceno.push({ stranka, duvod: `nepodařilo se rozpoznat termín příští revize (šablona: ${sablonaPopis})` });
+        continue;
+      }
+
+      zpravy.push({
+        cislo_zarizeni: extracted.cislo_zarizeni,
+        datum_provedeni: extracted.datum_provedeni,
+        novy_termin: extracted.novy_termin,
+        celkove_hodnoceni: extracted.celkove_hodnoceni,
+        vysledek_revize: klasifikujVysledekRevize(extracted.celkove_hodnoceni),
+        zjistena_zavada: extracted.zjistena_zavada,
+        technik_jmeno: extracted.technik_jmeno,
+        technik_cislo_opravneni: extracted.technik_cislo_opravneni,
+        stranka,
+      });
     }
 
-    const page = await doc.getPage(stranka);
-    const content = await page.getTextContent();
-    const lines = reconstructLines(content.items);
-
-    const sablona = detectSablona(lines);
-    if (!sablona) {
-      preskoceno.push({ stranka, duvod: "nerozpoznaný typ revizní zprávy" });
-      continue;
-    }
-
-    const extracted = sablona === "spotrebic" ? extractSpotrebicZprava(lines) : extractStrojZprava(lines);
-    const sablonaPopis = sablona === "spotrebic" ? "spotřebič" : "pracovní stroj";
-
-    if (!extracted.cislo_zarizeni) {
-      preskoceno.push({ stranka, duvod: `nepodařilo se najít Inventární číslo (šablona: ${sablonaPopis})` });
-      continue;
-    }
-
-    if (!extracted.datum_provedeni) {
-      preskoceno.push({ stranka, duvod: `nepodařilo se najít datum provedení revize (šablona: ${sablonaPopis})` });
-      continue;
-    }
-
-    if (!extracted.novy_termin) {
-      preskoceno.push({ stranka, duvod: `nepodařilo se rozpoznat termín příští revize (šablona: ${sablonaPopis})` });
-      continue;
-    }
-
-    zpravy.push({
-      cislo_zarizeni: extracted.cislo_zarizeni,
-      datum_provedeni: extracted.datum_provedeni,
-      novy_termin: extracted.novy_termin,
-      celkove_hodnoceni: extracted.celkove_hodnoceni,
-      vysledek_revize: klasifikujVysledekRevize(extracted.celkove_hodnoceni),
-      zjistena_zavada: extracted.zjistena_zavada,
-      technik_jmeno: extracted.technik_jmeno,
-      technik_cislo_opravneni: extracted.technik_cislo_opravneni,
-      stranka,
-    });
+    return { zpravy, preskoceno };
+  } finally {
+    await loadingTask.destroy();
   }
-
-  return { zpravy, preskoceno };
 }
