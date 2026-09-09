@@ -20,7 +20,7 @@ const PLAN_COLLECTION = "planovane_revize";
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
 // bezpečnostní strop, ať jedno načtení nikdy neroztáhne dotaz do nekonečna.
 const TABLE_LIMIT = 5000;
-const WARN_DAYS = 14;
+const WARN_DAYS = 30;
 const MISSING_TERMIN_STAV = "chybi_termin";
 
 type PlanRow = {
@@ -256,7 +256,7 @@ function DashboardOverview() {
     {
       label: "Blíží se termín",
       value: data ? String(data.stats.warn) : "—",
-      note: "do 14 dnů",
+      note: `do ${WARN_DAYS} dnů`,
       color: "border-accent text-accent",
       filterValue: "warn",
     },
