@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["https://1-repozitar.vercel.app", "http://localhost:3000"],
+    "method": ["GET", "HEAD", "PUT", "POST"],
+    "maxAgeSeconds": 3600,
+    "responseHeader": ["Content-Type", "Content-Disposition", "Access-Control-Allow-Origin"]
+  }
+]
