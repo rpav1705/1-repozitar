@@ -996,6 +996,12 @@ function RevizniZpravyReprocess() {
         string,
         QueryDocumentSnapshot<DocumentData>[],
       ]) => {
+        // Malá náhodná prodleva před každým stažením – rozloží špičky, kdy
+        // by jinak DOWNLOAD_CONCURRENCY workerů startovalo stahování ve
+        // stejném okamžiku (typický spouštěč "storage/retry-limit-exceeded"
+        // při dávkách desítek souborů za sebou).
+        await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
+
         let freshByStranka: Map<number, ParsedRevizniZprava> | null = null;
         let downloadError = "";
         try {
@@ -1088,8 +1094,11 @@ function RevizniZpravyReprocess() {
 
       // Skupiny (soubory) zpracováváme s omezenou souběžností – při stovkách
       // uložených zpráv by čistě sekvenční zpracování trvalo příliš dlouho,
-      // ale neomezená souběžnost by zase zbytečně zatížila Storage/Firestore.
-      const CONCURRENCY = 6;
+      // ale neomezená souběžnost by zase zbytečně zatížila Storage (zdroj
+      // "storage/retry-limit-exceeded" chyb při dávkách desítek souborů) –
+      // proto jen 4 souběžná stahování + malá náhodná prodleva výš v
+      // processGroup, ať appka nepálí požadavky na Storage v jedné špičce.
+      const DOWNLOAD_CONCURRENCY = 4;
       const groupEntries = Array.from(groups.entries());
       let nextIndex = 0;
       async function worker() {
@@ -1103,7 +1112,7 @@ function RevizniZpravyReprocess() {
           await processGroup(entry);
         }
       }
-      await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+      await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, () => worker()));
       const prerušeno = prerusitRef.current;
 
       // Prořezání historie (starší než poslední 2 podle data provedení pryč,
@@ -1121,6 +1130,9 @@ function RevizniZpravyReprocess() {
         smazanoZaznamu: 0,
         smazanoSouboru: 0,
       };
+      // Čistě Firestore operace (bez stahování ze Storage) – souběžnost
+      // nemusí být tak opatrná jako u stahování PDF výš.
+      const PRUNE_CONCURRENCY = 6;
       let nextPruneIndex = 0;
       async function pruneWorker() {
         while (nextPruneIndex < zarizeniList.length) {
@@ -1135,7 +1147,7 @@ function RevizniZpravyReprocess() {
           setPruneProgress({ done: pruneDone, total: zarizeniList.length });
         }
       }
-      await Promise.all(Array.from({ length: CONCURRENCY }, () => pruneWorker()));
+      await Promise.all(Array.from({ length: PRUNE_CONCURRENCY }, () => pruneWorker()));
 
       setResults((prev) =>
         prev.map((r) =>

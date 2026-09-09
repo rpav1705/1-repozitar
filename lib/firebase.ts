@@ -23,11 +23,15 @@ export const auth = getAuth(app);
 export const storage = getStorage(app);
 
 // Firebase Storage má u čtecích operací (getBytes/getBlob) defaultní
-// maxOperationRetryTime 2 minuty – když selhávají kvůli chybějícímu CORS
-// nastavení bucketu (viz cors.json v rootu repozitáře), SDK to celé 2
-// minuty tiše zkouší znovu, než operaci zahodí jako chybu. Appka pak
-// desítky/stovky souborů za sebou vypadá jako úplně zaseklá, i když ve
-// skutečnosti jen čeká na vypršení každého jednoho pokusu. Zkrácením na 20 s
-// se chyba (typicky CORS, ne pomalá síť – PDF soubory jsou malé) projeví
-// rychle místo toho, aby appka vypadala jako mrtvá.
-storage.maxOperationRetryTime = 20_000;
+// maxOperationRetryTime 2 minuty. Původně jsme ho kvůli podezření na
+// chybějící CORS nastavení bucketu zkrátili na 20 s (viz cors.json) – ruční
+// ověření (curl OPTIONS/GET přímo na firebasestorage.googleapis.com, i s
+// Origin hlavičkou z appky) ale ukázalo, že tenhle endpoint vždycky vrací
+// "Access-Control-Allow-Origin: *", takže CORS nikdy nebyl (a není) skutečná
+// příčina "storage/retry-limit-exceeded" chyb – ty byly jen SDK vzdávající
+// to moc brzo u přechodných síťových/rate-limit problémů (viz i souběžnost
+// stahování v app/nahrat/page.tsx). 60 s dává víc prostoru na opakované
+// pokusy, než appka operaci vzdá – a díky tlačítku "Přerušit zpracování"
+// (a checkpointu, který umí pokračovat) už appka nemusí kvůli dlouhému
+// čekání vypadat jako mrtvá/zaseklá tak jako dřív.
+storage.maxOperationRetryTime = 60_000;
