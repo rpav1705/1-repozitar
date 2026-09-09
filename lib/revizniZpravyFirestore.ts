@@ -25,3 +25,48 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
     technik_cislo_opravneni: zprava.technik_cislo_opravneni,
   };
 }
+
+/**
+ * Nastaví se jen při úspěšném zápisu z tlačítka "Znovu zpracovat uložené
+ * revizní zprávy" (ne při prvním nahrání) – appka podle něj v
+ * RevizniZpravyReprocess pozná, jestli tuhle zprávu tohle tlačítko už někdy
+ * viděla (výchozí dávka "nové" pak zpracuje jen ty, co ještě ne). Sdílené i
+ * s lib/revizniZpravyHistorie.ts (dedup záznamů se stejným datem provedení
+ * upřednostní ten s novějším "poslední úpravou") a se
+ * scripts/reprocess-all-revizni-zpravy.ts (Node ekvivalent stejného
+ * tlačítka), ať název pole nikde neujede.
+ */
+export const REPROCESS_MARKER_FIELD = "naposledy_zpracovano_reprocessem";
+
+/**
+ * Ořízne znak, který by v Firestore ID dokumentu způsobil problém (lomítko
+ * dělá z ID vnořenou cestu) – "." a ".." appka jako ID nepoužije vůbec
+ * (Firestore je odmítá). Sdílené mezi stabilním ID plánované revize (podle
+ * "PÚ", viz handleSave v app/nahrat/page.tsx) a revizní zprávy (viz
+ * revizniZpravaDocId níž).
+ */
+export function sanitizeDocId(raw: string): string {
+  const cleaned = raw.replace(/\//g, "_").trim();
+  return cleaned === "." || cleaned === ".." ? "" : cleaned;
+}
+
+/**
+ * Stabilní ID dokumentu v "revizni_zpravy", odvozené z čísla zařízení a
+ * (lokálního kalendářního) data provedení revize – umožňuje appce zapisovat
+ * přes setDoc místo addDoc. Opakované nahrání/zpracování STEJNÉ revize
+ * (stejné zařízení, stejné datum provedení) tak vždy přepíše existující
+ * záznam, místo aby vedle něj vytvořilo duplicitu s náhodným ID (přesně
+ * tohle appka dřív dělala u addDoc – viz i dedup starších záznamů v
+ * lib/revizniZpravyHistorie.ts, který existující duplicity z doby před
+ * touhle opravou uklidí). Datum se čte z lokálních komponent (getFullYear/
+ * getMonth/getDate), NE přes toISOString() – ten převádí do UTC a u času
+ * blízko půlnoci by mohl posunout den jinam, než appka jinde datum zobrazuje.
+ */
+export function revizniZpravaDocId(cisloZarizeni: string, datumProvedeni: Date): string {
+  const cisloId = sanitizeDocId(cisloZarizeni);
+  if (!cisloId) return "";
+  const rok = datumProvedeni.getFullYear();
+  const mesic = String(datumProvedeni.getMonth() + 1).padStart(2, "0");
+  const den = String(datumProvedeni.getDate()).padStart(2, "0");
+  return `${cisloId}_${rok}-${mesic}-${den}`;
+}

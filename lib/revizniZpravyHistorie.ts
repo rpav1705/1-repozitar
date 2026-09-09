@@ -13,6 +13,7 @@ import {
 } from "firebase/firestore";
 import { deleteObject, ref } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
+import { REPROCESS_MARKER_FIELD } from "@/lib/revizniZpravyFirestore";
 
 /**
  * Kolik posledních revizních zpráv (podle "datum_provedeni", sestupně) appka
@@ -24,6 +25,8 @@ export const HISTORIE_LIMIT = 2;
 export type VysledekSynchronizace = {
   smazanoZaznamu: number;
   smazanoSouboru: number;
+  /** Kolik ze smazanoZaznamu bylo konkrétně duplicit (stejné datum provedení jako jiná ponechaná zpráva). */
+  duplicitSmazano: number;
   /** Jestli existuje přesně jeden spárovaný záznam v "planovane_revize" a byl přepsán. */
   planSynchronizovan: boolean;
 };
@@ -33,6 +36,53 @@ function toDate(value: unknown): Date | null {
 }
 
 type Radek = { snap: QueryDocumentSnapshot<DocumentData>; datumProvedeni: Date };
+
+/**
+ * "Poslední úprava" záznamu jako číslo (ms) pro porovnání duplicit – novější
+ * z naposledy_zpracovano_reprocessem (appka ho dřív mohla přeparsovat s
+ * opravenou logikou) a nahrano (appka ho vždycky nastaví při uploadu).
+ * Chybějící pole se počítá jako nekonečně staré, ne jako chyba.
+ */
+function poslednUpravaMillis(data: DocumentData): number {
+  const kandidati = [data[REPROCESS_MARKER_FIELD], data.nahrano]
+    .filter((v): v is Timestamp => v instanceof Timestamp)
+    .map((t) => t.toMillis());
+  return kandidati.length > 0 ? Math.max(...kandidati) : -Infinity;
+}
+
+/**
+ * Sloučí záznamy se STEJNÝM datem provedení (duplicity – ať vznikly
+ * duplicitním nahráním/zpracováním stejné revize před zavedením stabilního
+ * ID zápisu v revizni_zpravy, viz revizniZpravaDocId, nebo jakkoli jinak) do
+ * jednoho: ponechá ten s novější "poslední úpravou", ostatní vrátí ke
+ * smazání. Bez týhle deduplikace by dvě zprávy se STEJNÝM datem mohly
+ * skončit jedna jako "aktuální" a druhá jako "předchozí" zároveň, místo aby
+ * "předchozí" ukazovala na skutečně jinou (starší) revizi.
+ */
+function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[] } {
+  const podleData = new Map<number, Radek[]>();
+  for (const radek of radky) {
+    const klic = radek.datumProvedeni.getTime();
+    const skupina = podleData.get(klic) ?? [];
+    skupina.push(radek);
+    podleData.set(klic, skupina);
+  }
+
+  const unikatni: Radek[] = [];
+  const duplicitni: Radek[] = [];
+  for (const skupina of podleData.values()) {
+    if (skupina.length === 1) {
+      unikatni.push(skupina[0]);
+      continue;
+    }
+    const serazena = [...skupina].sort(
+      (a, b) => poslednUpravaMillis(b.snap.data()) - poslednUpravaMillis(a.snap.data())
+    );
+    unikatni.push(serazena[0]);
+    duplicitni.push(...serazena.slice(1));
+  }
+  return { unikatni, duplicitni };
+}
 
 /**
  * Smaže dané záznamy v "revizni_zpravy" a k nim patřící PDF ve Storage –
@@ -78,7 +128,10 @@ async function smazZpravy(
  * HISTORIE_LIMIT (podle data provedení, sestupně) a starší smaže – jak
  * Firestore záznam v "revizni_zpravy", tak PDF ve Storage (soubor se maže
  * jen když už na něj neodkazuje žádná jiná ponechaná zpráva – jeden nahraný
- * PDF může obsahovat revize pro víc zařízení na různých stránkách).
+ * PDF může obsahovat revize pro víc zařízení na různých stránkách). Před
+ * oříznutím navíc slouzDuplicity() sloučí záznamy se stejným datem provedení
+ * do jednoho (viz tam) – jinak by appka duplicitní zprávu mohla ukázat jako
+ * "aktuální" i "předchozí" zároveň, i když jde o tutéž revizi.
  *
  * Zároveň dosadí do spárovaného záznamu v "planovane_revize" pole ze
  * SKUTEČNĚ nejnovější ponechané zprávy (ne z té, která byla zpracovaná či
@@ -98,18 +151,23 @@ export async function synchronizujHistoriiZarizeni(
     query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
   );
 
-  const radky: Radek[] = revSnap.docs
+  const vsechnyRadky: Radek[] = revSnap.docs
     .map((snap) => ({ snap, datumProvedeni: toDate(snap.data().datum_provedeni) }))
-    .filter((r): r is Radek => r.datumProvedeni !== null)
-    .sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
+    .filter((r): r is Radek => r.datumProvedeni !== null);
+
+  // Duplicity (stejné datum provedení) se sloučí PŘED seřazením/oříznutím na
+  // HISTORIE_LIMIT – jinak by se mohly obě dostat do "ponechane" a appka by
+  // je ukázala jako aktuální i předchozí zprávu zároveň, viz slouzDuplicity.
+  const { unikatni, duplicitni } = slouzDuplicity(vsechnyRadky);
+  const radky = unikatni.sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
 
   const ponechane = radky.slice(0, HISTORIE_LIMIT);
-  const kSmazani = radky.slice(HISTORIE_LIMIT);
+  const kSmazani = [...radky.slice(HISTORIE_LIMIT), ...duplicitni];
 
   const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(kSmazani.map((r) => r.snap));
   const planSynchronizovan = await synchronizujPlanovanouRevizi(cisloZarizeni, ponechane);
 
-  return { smazanoZaznamu, smazanoSouboru, planSynchronizovan };
+  return { smazanoZaznamu, smazanoSouboru, duplicitSmazano: duplicitni.length, planSynchronizovan };
 }
 
 async function synchronizujPlanovanouRevizi(

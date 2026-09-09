@@ -6,13 +6,13 @@ import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
 import { db, storage } from "@/lib/firebase";
 import {
-  addDoc,
   collection,
   doc,
   DocumentData,
   getDocs,
   query,
   QueryDocumentSnapshot,
+  setDoc,
   Timestamp,
   updateDoc,
   where,
@@ -21,7 +21,12 @@ import {
 import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/lib/pdfRevizniZprava";
-import { revizniZpravaToFirestoreFields } from "@/lib/revizniZpravyFirestore";
+import {
+  REPROCESS_MARKER_FIELD,
+  revizniZpravaDocId,
+  revizniZpravaToFirestoreFields,
+  sanitizeDocId,
+} from "@/lib/revizniZpravyFirestore";
 import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { describeSaveError } from "@/lib/friendlyError";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
@@ -36,12 +41,6 @@ function chunk<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
-}
-
-// Firestore ID nesmí obsahovat "/" a nesmí to být přesně "." nebo "..".
-function sanitizeDocId(raw: string): string {
-  const cleaned = raw.replace(/\//g, "_").trim();
-  return cleaned === "." || cleaned === ".." ? "" : cleaned;
 }
 
 // Stejná logika jako v handleSave – použité tady jen na náhled v UI, ať jde
@@ -467,7 +466,17 @@ function RevizniZpravyUpload() {
               posledni_revize_vcas = puvodniTermin ? zprava.datum_provedeni <= puvodniTermin : null;
             }
 
-            await addDoc(collection(db, "revizni_zpravy"), {
+            // setDoc se stabilním ID (číslo zařízení + datum provedení, viz
+            // revizniZpravaDocId) MÍSTO addDoc – opakované nahrání/zpracování
+            // STEJNÉ revize (např. omylem nahraný stejný PDF podruhé) tak
+            // přepíše existující záznam, místo aby vedle něj vytvořilo
+            // duplicitu s náhodným ID (to appka dřív dělala, viz komentář u
+            // revizniZpravaDocId a dedup v lib/revizniZpravyHistorie.ts).
+            const zpravaId = revizniZpravaDocId(zprava.cislo_zarizeni, zprava.datum_provedeni);
+            const zpravaRef = zpravaId
+              ? doc(db, "revizni_zpravy", zpravaId)
+              : doc(collection(db, "revizni_zpravy"));
+            await setDoc(zpravaRef, {
               ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
               soubor_nazev: file.name,
@@ -694,6 +703,8 @@ type PruneSouhrn = {
   zarizeniSMazanim: number;
   smazanoZaznamu: number;
   smazanoSouboru: number;
+  /** Z smazanoZaznamu – kolik konkrétně bylo duplicit (stejné datum provedení jako ponechaná zpráva). */
+  duplicitSmazano: number;
 };
 
 // Diagnostická tabulka výsledků ukazuje jen posledních RESULTS_DISPLAY_LIMIT
@@ -784,11 +795,6 @@ function vyberAktualniZpravy(
   }
   return vybrane;
 }
-
-// Nastaví se jen při úspěšném zápisu z TOHOHLE tlačítka (ne při prvním
-// nahrání – viz REPROCESS_MARKER_FIELD komentář u jeZpracovanoReprocessem
-// níž), takže nově nahrané zprávy jím zpočátku nemají označené.
-const REPROCESS_MARKER_FIELD = "naposledy_zpracovano_reprocessem";
 
 /**
  * Jestli tuhle zprávu tlačítko "Znovu zpracovat" už někdy úspěšně
@@ -1245,6 +1251,7 @@ function RevizniZpravyReprocess() {
         zarizeniSMazanim: 0,
         smazanoZaznamu: 0,
         smazanoSouboru: 0,
+        duplicitSmazano: 0,
       };
       // Čistě Firestore operace (bez stahování ze Storage) – souběžnost
       // nemusí být tak opatrná jako u stahování PDF výš.
@@ -1258,6 +1265,7 @@ function RevizniZpravyReprocess() {
           if (vysledek.smazanoZaznamu > 0) souhrn.zarizeniSMazanim += 1;
           souhrn.smazanoZaznamu += vysledek.smazanoZaznamu;
           souhrn.smazanoSouboru += vysledek.smazanoSouboru;
+          souhrn.duplicitSmazano += vysledek.duplicitSmazano;
           planSynchronizovanoByZarizeni.set(cislo, vysledek.planSynchronizovan);
           pruneDone += 1;
           setPruneProgress({ done: pruneDone, total: zarizeniList.length });
@@ -1460,7 +1468,8 @@ function RevizniZpravyReprocess() {
               <div className="rounded-md border border-green-100 bg-green-50 px-3 py-2 text-[12.5px] text-status-ok">
                 Prořezání historie: zkontrolováno {pruneSouhrn.zarizeni} čísel zařízení, u{" "}
                 {pruneSouhrn.zarizeniSMazanim} z nich se mazalo. Smazáno celkem{" "}
-                {pruneSouhrn.smazanoZaznamu} starších záznamů v „revizni_zpravy“ a{" "}
+                {pruneSouhrn.smazanoZaznamu} starších záznamů v „revizni_zpravy“ (z toho{" "}
+                {pruneSouhrn.duplicitSmazano} duplicit se stejným datem provedení) a{" "}
                 {pruneSouhrn.smazanoSouboru} PDF souborů ve Storage.
               </div>
             )}

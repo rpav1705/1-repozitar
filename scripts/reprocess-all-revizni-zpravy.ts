@@ -23,14 +23,18 @@
  *   4. Přepíše naparsovaná pole zpět do Firestore (u úspěchu) a označí
  *      zprávu marker polem "naposledy_zpracovano_reprocessem", stejně jako
  *      appka.
- *   5. U každého dotčeného čísla zařízení pak zkrátí historii na poslední
- *      HISTORIE_LIMIT záznamy (starší smaže i s PDF ve Storage) a dosadí
- *      výsledek do "planovane_revize" – tahle část zrcadlí algoritmus z
- *      lib/revizniZpravyHistorie.ts (synchronizujHistoriiZarizeni). Nejde
+ *   5. U každého dotčeného čísla zařízení pak nejdřív sloučí záznamy se
+ *      STEJNÝM datem provedení (duplicity – typicky z doby, než zápis nových
+ *      zpráv začal používat stabilní ID, viz revizniZpravaDocId v
+ *      lib/revizniZpravyFirestore.ts), pak zkrátí historii na poslední
+ *      HISTORIE_LIMIT záznamy (starší i duplicitní smaže i s PDF ve Storage)
+ *      a dosadí výsledek do "planovane_revize" – tahle část zrcadlí algoritmus
+ *      z lib/revizniZpravyHistorie.ts (synchronizujHistoriiZarizeni). Nejde
  *      odtud přímo naimportovat, protože ten soubor používá KLIENTSKÝ
  *      "firebase/firestore" SDK (Timestamp/Firestore instance neslučitelné s
  *      "firebase-admin/firestore") – při změně algoritmu tam je potřeba
- *      upravit i tuhle kopii níž (synchronizujHistoriiZarizeniAdmin).
+ *      upravit i tuhle kopii níž (synchronizujHistoriiZarizeniAdmin,
+ *      slouzDuplicity, poslednUpravaMillis).
  *
  * Jedno selhání souboru/zařízení (chyba stažení, parsování, zápisu) NEZASTAVÍ
  * celý běh – zaloguje se a pokračuje se dál (viz Vysledky.zaznamChybu a
@@ -52,13 +56,13 @@ import { initializeApp, applicationDefault } from "firebase-admin/app";
 import { getFirestore, Timestamp, Firestore, QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "../lib/pdfRevizniZprava";
+import { REPROCESS_MARKER_FIELD } from "../lib/revizniZpravyFirestore";
 
 type Bucket = ReturnType<ReturnType<typeof getStorage>["bucket"]>;
 
 const STORAGE_BUCKET = "repozitar-7f22a.firebasestorage.app";
 const REVIZNI_ZPRAVY_COLLECTION = "revizni_zpravy";
 const PLANOVANE_REVIZE_COLLECTION = "planovane_revize";
-const REPROCESS_MARKER_FIELD = "naposledy_zpracovano_reprocessem";
 /** Musí sedět s lib/revizniZpravyHistorie.ts (HISTORIE_LIMIT). */
 const HISTORIE_LIMIT = 2;
 
@@ -186,8 +190,10 @@ class Vysledky {
   vytiskniSouhrn(pruneSouhrn: {
     zarizeni: number;
     zarizeniSMazanim: number;
+    zarizeniSDuplicitou: number;
     smazanoZaznamu: number;
     smazanoSouboru: number;
+    duplicitSmazano: number;
   }) {
     console.log("\n===== Souhrn reparsování =====");
     console.log(`Zpracováno celkem: ${this.zpracovano}`);
@@ -204,7 +210,9 @@ class Vysledky {
     console.log("\n===== Souhrn prořezání historie =====");
     console.log(`Dotčených zařízení: ${pruneSouhrn.zarizeni}`);
     console.log(`  s mazáním: ${pruneSouhrn.zarizeniSMazanim}`);
-    console.log(`  smazáno záznamů: ${pruneSouhrn.smazanoZaznamu}`);
+    console.log(`  s duplicitní revizí (stejné datum provedení): ${pruneSouhrn.zarizeniSDuplicitou}`);
+    console.log(`  smazáno záznamů celkem: ${pruneSouhrn.smazanoZaznamu}`);
+    console.log(`    z toho duplicit: ${pruneSouhrn.duplicitSmazano}`);
     console.log(`  smazáno souborů: ${pruneSouhrn.smazanoSouboru}`);
   }
 }
@@ -299,6 +307,40 @@ function toDate(value: unknown): Date | null {
   return value instanceof Timestamp ? value.toDate() : null;
 }
 
+/** Zrcadlí poslednUpravaMillis v lib/revizniZpravyHistorie.ts. */
+function poslednUpravaMillis(data: FirebaseFirestore.DocumentData): number {
+  const kandidati = [data[REPROCESS_MARKER_FIELD], data.nahrano]
+    .filter((v): v is Timestamp => v instanceof Timestamp)
+    .map((t) => t.toMillis());
+  return kandidati.length > 0 ? Math.max(...kandidati) : -Infinity;
+}
+
+/** Zrcadlí slouzDuplicity v lib/revizniZpravyHistorie.ts. */
+function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[] } {
+  const podleData = new Map<number, Radek[]>();
+  for (const radek of radky) {
+    const klic = radek.datumProvedeni.getTime();
+    const skupina = podleData.get(klic) ?? [];
+    skupina.push(radek);
+    podleData.set(klic, skupina);
+  }
+
+  const unikatni: Radek[] = [];
+  const duplicitni: Radek[] = [];
+  for (const skupina of podleData.values()) {
+    if (skupina.length === 1) {
+      unikatni.push(skupina[0]);
+      continue;
+    }
+    const serazena = [...skupina].sort(
+      (a, b) => poslednUpravaMillis(b.snap.data()) - poslednUpravaMillis(a.snap.data())
+    );
+    unikatni.push(serazena[0]);
+    duplicitni.push(...serazena.slice(1));
+  }
+  return { unikatni, duplicitni };
+}
+
 async function smazZpravyAdmin(
   db: Firestore,
   bucket: Bucket,
@@ -388,19 +430,29 @@ async function synchronizujHistoriiZarizeniAdmin(
   db: Firestore,
   bucket: Bucket,
   cisloZarizeni: string
-): Promise<{ smazanoZaznamu: number; smazanoSouboru: number; planSynchronizovan: boolean }> {
+): Promise<{
+  smazanoZaznamu: number;
+  smazanoSouboru: number;
+  duplicitSmazano: number;
+  planSynchronizovan: boolean;
+}> {
   const revSnap = await db
     .collection(REVIZNI_ZPRAVY_COLLECTION)
     .where("cislo_zarizeni", "==", cisloZarizeni)
     .get();
 
-  const radky: Radek[] = revSnap.docs
+  const vsechnyRadky: Radek[] = revSnap.docs
     .map((snap) => ({ snap, datumProvedeni: toDate(snap.data().datum_provedeni) }))
-    .filter((r): r is Radek => r.datumProvedeni !== null)
-    .sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
+    .filter((r): r is Radek => r.datumProvedeni !== null);
+
+  // Duplicity (stejné datum provedení) se sloučí PŘED oříznutím na
+  // HISTORIE_LIMIT – viz slouzDuplicity a stejný komentář u
+  // lib/revizniZpravyHistorie.ts::synchronizujHistoriiZarizeni.
+  const { unikatni, duplicitni } = slouzDuplicity(vsechnyRadky);
+  const radky = unikatni.sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
 
   const ponechane = radky.slice(0, HISTORIE_LIMIT);
-  const kSmazani = radky.slice(HISTORIE_LIMIT);
+  const kSmazani = [...radky.slice(HISTORIE_LIMIT), ...duplicitni];
 
   const { smazanoZaznamu, smazanoSouboru } = await smazZpravyAdmin(
     db,
@@ -409,7 +461,7 @@ async function synchronizujHistoriiZarizeniAdmin(
   );
   const planSynchronizovan = await synchronizujPlanovanouReviziAdmin(db, cisloZarizeni, ponechane);
 
-  return { smazanoZaznamu, smazanoSouboru, planSynchronizovan };
+  return { smazanoZaznamu, smazanoSouboru, duplicitSmazano: duplicitni.length, planSynchronizovan };
 }
 
 // ---------------------------------------------------------------------------
@@ -455,8 +507,10 @@ async function main() {
   const pruneSouhrn = {
     zarizeni: zarizeniList.length,
     zarizeniSMazanim: 0,
+    zarizeniSDuplicitou: 0,
     smazanoZaznamu: 0,
     smazanoSouboru: 0,
+    duplicitSmazano: 0,
   };
   let nextPruneIndex = 0;
   let pruneDone = 0;
@@ -468,8 +522,10 @@ async function main() {
       try {
         const vysledek = await synchronizujHistoriiZarizeniAdmin(db, bucket, cislo);
         if (vysledek.smazanoZaznamu > 0) pruneSouhrn.zarizeniSMazanim += 1;
+        if (vysledek.duplicitSmazano > 0) pruneSouhrn.zarizeniSDuplicitou += 1;
         pruneSouhrn.smazanoZaznamu += vysledek.smazanoZaznamu;
         pruneSouhrn.smazanoSouboru += vysledek.smazanoSouboru;
+        pruneSouhrn.duplicitSmazano += vysledek.duplicitSmazano;
       } catch (err) {
         console.error(
           `  prořezání historie zařízení ${cislo} selhalo: ${err instanceof Error ? err.message : err}`
