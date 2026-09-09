@@ -601,18 +601,64 @@ type PruneSouhrn = {
 };
 
 /**
+ * U každého čísla zařízení appka drží nejvýš HISTORIE_LIMIT (2) revizních
+ * zpráv – aktuální a předchozí, viz synchronizujHistoriiZarizeni. Ta
+ * předchozí je čistě historická (appka z ní nic dál nevyhodnocuje, jen na ni
+ * odkazuje šedý odznak "Předchozí revizní zpráva"), takže ji nemá smysl při
+ * přeparsování zbytečně znovu stahovat – vybere se proto jen ta nejnovější
+ * (podle "datum_provedeni") z každé skupiny. Zprávy bez rozpoznatelného
+ * čísla zařízení se ponechají všechny – u nich nejde "aktuální" určit, takže
+ * je bezpečnější je nepřeskakovat.
+ */
+function vyberAktualniZpravy(
+  docs: QueryDocumentSnapshot<DocumentData>[]
+): QueryDocumentSnapshot<DocumentData>[] {
+  const podleZarizeni = new Map<string, QueryDocumentSnapshot<DocumentData>[]>();
+  const bezCisla: QueryDocumentSnapshot<DocumentData>[] = [];
+
+  for (const d of docs) {
+    const cislo = d.data().cislo_zarizeni;
+    if (typeof cislo === "string" && cislo) {
+      const skupina = podleZarizeni.get(cislo) ?? [];
+      skupina.push(d);
+      podleZarizeni.set(cislo, skupina);
+    } else {
+      bezCisla.push(d);
+    }
+  }
+
+  const aktualniDatum = (d: QueryDocumentSnapshot<DocumentData>) => {
+    const hodnota = d.data().datum_provedeni;
+    return hodnota instanceof Timestamp ? hodnota.toMillis() : -Infinity;
+  };
+
+  const vybrane = [...bezCisla];
+  for (const skupina of podleZarizeni.values()) {
+    vybrane.push(
+      skupina.reduce((nejnovejsi, d) => (aktualniDatum(d) > aktualniDatum(nejnovejsi) ? d : nejnovejsi))
+    );
+  }
+  return vybrane;
+}
+
+/**
  * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
  * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
  * jimi extrahovaná pole – ať uživatel nemusí soubory znovu ručně nahrávat
  * pokaždé, když přibude nové extrahované pole (nebo se opraví parsování).
- * Víc revizních zpráv může odkazovat na stejný nahraný soubor (víc zařízení
- * na stránku) – soubor se proto stahuje a parsuje jen jednou na skupinu.
+ * Zpracovává jen AKTUÁLNÍ zprávu u každého zařízení (viz
+ * vyberAktualniZpravy) – tu předchozí appka dál drží jako historii, ale
+ * nikde ji nevyhodnocuje, takže by bylo zbytečné ji znovu stahovat. Víc
+ * revizních zpráv může odkazovat na stejný nahraný soubor (víc zařízení na
+ * stránku) – soubor se proto stahuje a parsuje jen jednou na skupinu.
  *
- * Po přepočítání polí navíc u KAŽDÉHO dotčeného čísla zařízení spustí
- * synchronizujHistoriiZarizeni – tím se historie zkrátí na poslední 2 zprávy
- * (starší se smažou i s PDF ve Storage) a do plánu se dosadí skutečně
- * nejnovější zpráva. Tohle tlačítko tak zároveň slouží jako jednorázové
- * prořezání i pro zprávy uložené předtím, než appka historii omezovat začala.
+ * Po přepočítání polí navíc u KAŽDÉHO dotčeného čísla zařízení (aktuálního i
+ * historicky předchozího – to se řeší samo, protože sync čte fresh data
+ * přímo z Firestore) spustí synchronizujHistoriiZarizeni – tím se historie
+ * zkrátí na poslední 2 zprávy (starší se smažou i s PDF ve Storage) a do
+ * plánu se dosadí skutečně nejnovější zpráva. Tohle tlačítko tak zároveň
+ * slouží jako jednorázové prořezání i pro zprávy uložené předtím, než appka
+ * historii omezovat začala.
  */
 function RevizniZpravyReprocess() {
   const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
@@ -632,7 +678,7 @@ function RevizniZpravyReprocess() {
 
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
-      const docs = snap.docs;
+      const docs = vyberAktualniZpravy(snap.docs);
       setProgress({ done: 0, total: docs.length });
 
       // Skupina podle pdf_storage_path – víc revizních zpráv (stránek) může
@@ -814,8 +860,10 @@ function RevizniZpravyReprocess() {
           přepíše jimi extrahovaná pole – bez toho, aby bylo potřeba soubory znovu ručně vybírat
           na disku. Použij tohle tlačítko vždycky, když appka začne umět vytáhnout z revizní
           zprávy další údaj (nebo se opraví parsování existujícího), ať se dřív nahrané zprávy
-          doplní/opraví automaticky. Zároveň u každého čísla zařízení zkrátí historii na poslední 2
-          revizní zprávy (podle data provedení) – starší smaže i s PDF ve Storage.
+          doplní/opraví automaticky. U každého zařízení se přeparsuje jen AKTUÁLNÍ (nejnovější)
+          zpráva – ta předchozí zůstává v appce dál viditelná (šedý odznak), jen se zbytečně znovu
+          nestahuje. Zároveň u každého čísla zařízení zkrátí historii na poslední 2 revizní zprávy
+          (podle data provedení) – starší smaže i s PDF ve Storage.
         </p>
 
         <div>
