@@ -290,11 +290,13 @@ function extractZjistenaZavadaSpotrebic(lines: string[]): string | null {
 }
 
 function extractSpotrebicZprava(lines: string[]) {
+  const celkove_hodnoceni = extractCelkoveHodnoceniSpotrebic(lines);
   return {
     cislo_zarizeni: extractInventarniCisloSpotrebic(lines),
     datum_provedeni: extractDatumProvedeniSpotrebic(lines),
     novy_termin: extractTerminSpotrebic(lines),
-    celkove_hodnoceni: extractCelkoveHodnoceniSpotrebic(lines),
+    celkove_hodnoceni,
+    vysledek_revize: klasifikujVysledekRevize(celkove_hodnoceni),
     zjistena_zavada: extractZjistenaZavadaSpotrebic(lines),
     technik_jmeno: extractTechnikJmenoSpotrebic(lines),
     technik_cislo_opravneni: extractCisloOpravneniSpotrebic(lines),
@@ -380,15 +382,72 @@ function extractPosudekStroj(lines: string[]): string {
   return lines[idx].split(/Celkový posudek:/)[1]?.trim() ?? "";
 }
 
+/**
+ * "Celkový posudek:" (viz extractPosudekStroj výš) je vždycky stejná úvodní
+ * prózová věta ("Revidované zařízení je z hlediska bezpečnosti schopno
+ * provozu při dodržení podmínek uvedených...") – NIKDY neobsahuje doslova
+ * "vyhovuje"/"nevyhovuje", takže z něj nejde (na rozdíl od šablony A)
+ * odvodit OK/NOK. Skutečný výsledek je dál na stránce v sekci
+ * "B.  Kontroly (ČSN EN 60204-1 ed.3, čl. 18.6 a 18.7)" – čtyři dílčí
+ * kontroly (funkce tlačítka STOP, nouzové zastavení, nastavení proudových
+ * relé, kontrola rozběhu stroje po ztrátě napětí a jeho obnovení), každá
+ * zakončená "vyhovuje"/"nevyhovuje" – a v tabulce "Zjištěné závady" pod ní
+ * (sloupce Číslo / Zjištěné závady / Termín odstranění, končí řádkem
+ * "Stanovení termínu další revize:"). Ověřeno na 101 reálných zprávách (byly
+ * dřív mylně KE_KONTROLE) – všech 101 mělo identickou strukturu a prázdnou
+ * tabulku, žádná neměla "nevyhovuje", takže se korektně vyhodnotí jako OK;
+ * skutečnou NOK zprávu s vyplněnou tabulkou appka zatím neviděla, format
+ * textu závady se tak může upřesnit, až se nějaká objeví.
+ */
+function extractVysledekKontrolStroj(
+  lines: string[]
+): { vysledek_revize: VysledekRevize; zjistena_zavada: string | null } | null {
+  const kontrolyIdx = lines.findIndex((l) => /^B\.\s*Kontroly\b/.test(l));
+  if (kontrolyIdx === -1) return null;
+
+  const tabulkaIdx = lines.findIndex(
+    (l, i) => i > kontrolyIdx && /Číslo\s+Zjištěné\s+závady\s+Termín\s+odstranění/i.test(l)
+  );
+  if (tabulkaIdx === -1) return null;
+
+  const terminIdx = lines.findIndex(
+    (l, i) => i > tabulkaIdx && /Stanovení termínu další revize:/.test(l)
+  );
+
+  const kontrolyRadky = lines.slice(kontrolyIdx + 1, tabulkaIdx);
+  const nejakaNevyhovuje = kontrolyRadky.some((l) => /nevyhovuje/i.test(l));
+
+  const zavadaRadky = (terminIdx === -1 ? lines.slice(tabulkaIdx + 1) : lines.slice(tabulkaIdx + 1, terminIdx))
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const zavadaText = zavadaRadky.join(" ").trim();
+
+  if (nejakaNevyhovuje || zavadaText.length > 0) {
+    return {
+      vysledek_revize: "NOK",
+      zjistena_zavada:
+        zavadaText.length > 0
+          ? zavadaText
+          : "dílčí kontrola v sekci \"B. Kontroly\" neuvádí \"vyhovuje\"",
+    };
+  }
+
+  return { vysledek_revize: "OK", zjistena_zavada: null };
+}
+
 function extractStrojZprava(lines: string[]) {
+  const kontroly = extractVysledekKontrolStroj(lines);
   return {
     cislo_zarizeni: extractInventarniCisloStroj(lines),
     datum_provedeni: extractDatumProvedeniStroj(lines),
     novy_termin: extractTerminStroj(lines),
     celkove_hodnoceni: extractPosudekStroj(lines),
-    // Rozvržení pole se závadou/poznámkou u téhle šablony zatím nebylo
-    // ověřené na žádné reálné zprávě – dokud nebude, necháváme null.
-    zjistena_zavada: null as string | null,
+    // Sekce "B. Kontroly" + tabulka "Zjištěné závady" se nenajde jen u
+    // úplně jiné (třetí, zatím neznámé) varianty šablony – appka v tom
+    // případě zůstane u KE_KONTROLE stejně jako dosud (viz
+    // extractVysledekKontrolStroj).
+    vysledek_revize: kontroly?.vysledek_revize ?? ("KE_KONTROLE" as VysledekRevize),
+    zjistena_zavada: kontroly?.zjistena_zavada ?? null,
     technik_jmeno: extractTechnikJmenoStroj(lines),
     technik_cislo_opravneni: extractCisloOpravneniStroj(lines),
   };
@@ -482,7 +541,7 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
         datum_provedeni: extracted.datum_provedeni,
         novy_termin: extracted.novy_termin,
         celkove_hodnoceni: extracted.celkove_hodnoceni,
-        vysledek_revize: klasifikujVysledekRevize(extracted.celkove_hodnoceni),
+        vysledek_revize: extracted.vysledek_revize,
         zjistena_zavada: extracted.zjistena_zavada,
         technik_jmeno: extracted.technik_jmeno,
         technik_cislo_opravneni: extracted.technik_cislo_opravneni,
