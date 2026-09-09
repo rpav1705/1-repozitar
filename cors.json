@@ -1,6 +1,10 @@
 [
   {
-    "origin": ["https://1-repozitar.vercel.app", "http://localhost:3000"],
+    "origin": [
+      "https://1-repozitar.vercel.app",
+      "http://localhost:3000",
+      "https://super-duper-guide-6v47rwgw95qpf5q97-3000.app.github.dev"
+    ],
     "method": ["GET", "HEAD", "PUT", "POST"],
     "maxAgeSeconds": 3600,
     "responseHeader": ["Content-Type", "Content-Disposition", "Access-Control-Allow-Origin"]
