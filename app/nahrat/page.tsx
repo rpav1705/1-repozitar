@@ -24,6 +24,7 @@ import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/li
 import { revizniZpravaToFirestoreFields } from "@/lib/revizniZpravyFirestore";
 import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { describeSaveError } from "@/lib/friendlyError";
+import { yieldToMainThread } from "@/lib/yieldToMainThread";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
@@ -709,12 +710,17 @@ const KE_KONTROLE_LIST_LIMIT = 50;
 // Zpracování se nespouští na celou frontu najednou, ale po dávkách max.
 // REPROCESS_BATCH_SIZE souborů (skupin) – u front v řádu tisíců appka jinak
 // celou dobu běhu držela v paměti kompletní seznam VŠECH zbývajících skupin
-// (Map/pole s odkazy na Firestore dokumenty pro každou z nich), navíc bez
-// jediné pauzy, kdy by prohlížeč dostal prostor na garbage collection. Mezi
-// dávkami appka uvolní referenci na tu právě dokončenou (viz groupBatches
-// níž) a na krátko počká – dál to ale z pohledu uživatele vypadá jako jedno
-// souvislé zpracování, jen interně rozporcované na menší kousky.
-const REPROCESS_BATCH_SIZE = 100;
+// (Map/pole s odkazy na Firestore dokumenty pro každou z nich). Mezi dávkami
+// appka uvolní referenci na tu právě dokončenou (viz groupBatches níž) a na
+// krátko počká – dál to ale z pohledu uživatele vypadá jako jedno souvislé
+// zpracování, jen interně rozporcované na menší kousky.
+//
+// POZOR: samotná pauza mezi dávkami NENÍ hlavní ochrana proti "Stránka
+// nereaguje" – tou je yieldToMainThread() PO KAŽDÉM jednotlivém souboru (viz
+// worker níž a komentář tam), který hlavnímu vláknu vrací řízení mnohem
+// častěji, přímo uvnitř dávky. Menší dávka tu slouží hlavně jemnějšímu
+// checkpointu/uvolňování paměti, ne primárně plynulosti UI.
+const REPROCESS_BATCH_SIZE = 50;
 const REPROCESS_BATCH_PAUSE_MS = 1500;
 
 type VysledkySouhrn = {
@@ -1196,6 +1202,14 @@ function RevizniZpravyReprocess() {
             const entry = batchEntries[nextIndex];
             nextIndex += 1;
             await processGroup(entry);
+            // Vrátí řízení hlavnímu vláknu PO KAŽDÉM zpracovaném souboru (ne
+            // jen jednou za celou dávku 50/100) – i když processGroup čeká na
+            // síťová volání (Storage/Firestore), řetězec navazujících await
+            // pokračování (mikrotasky) se bez týhle explicitní hranice může
+            // provést dost dlouho v kuse bez jediné šance na vykreslení
+            // snímku nebo zpracování uživatelského vstupu. Tohle (ne pauza
+            // mezi dávkami) je hlavní obrana proti "Stránka nereaguje".
+            await yieldToMainThread();
           }
         }
         await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, () => worker()));
@@ -1247,6 +1261,11 @@ function RevizniZpravyReprocess() {
           planSynchronizovanoByZarizeni.set(cislo, vysledek.planSynchronizovan);
           pruneDone += 1;
           setPruneProgress({ done: pruneDone, total: zarizeniList.length });
+          // Stejný důvod jako u worker() výš – i tahle fáze prochází celý
+          // zbylý seznam zařízení (klidně přes tisíc) v jednom kuse bez
+          // dávkování, takže potřebuje vlastní pravidelnou hranici pro
+          // vykreslení/uživatelský vstup.
+          await yieldToMainThread();
         }
       }
       await Promise.all(Array.from({ length: PRUNE_CONCURRENCY }, () => pruneWorker()));

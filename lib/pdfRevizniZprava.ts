@@ -1,5 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist";
 import { parseFlexibleDate } from "@/lib/parseDate";
+import { yieldToMainThread } from "@/lib/yieldToMainThread";
 
 /**
  * Klasifikace "celkove_hodnoceni" do tří stavů – appka nikdy nemá jistě
@@ -404,6 +405,15 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
   const preskoceno: SkippedPage[] = [];
 
   for (let stranka = 1; stranka <= doc.numPages; stranka++) {
+    // getPage/getTextContent samotné běží ve web workeru pdf.js (mimo hlavní
+    // vlákno), ale reconstructLines/regexové extrakce níž už běží tady na
+    // hlavním vlákně appky – u souboru s hodně stránkami (víc revizních zpráv
+    // v jednom PDF, jedna na stránku) by se bez týhle pauzy mohly zřetězit
+    // za sebou bez jediné šance na vykreslení/uživatelský vstup.
+    if (stranka > 1 && stranka % 5 === 0) {
+      await yieldToMainThread();
+    }
+
     const page = await doc.getPage(stranka);
     const content = await page.getTextContent();
     const lines = reconstructLines(content.items);
