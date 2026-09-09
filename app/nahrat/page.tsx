@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
@@ -773,6 +773,61 @@ type ReprocessMod = "nove" | "vse";
  */
 let bezicíZpracovani: { rezim: ReprocessMod; zacatek: Date } | null = null;
 
+// Checkpoint rozdělané dávky – v localStorage, ať přežije i zavření karty
+// nebo pád prohlížeče uprostřed běhu (na rozdíl od bezicíZpracovani výše,
+// která je jen v paměti a mizí s kartou). Ukládá se průběžně po každé
+// úspěšně zpracované zprávě, ne až na konci.
+const REPROCESS_CHECKPOINT_KEY = "revizniZpravyReprocessCheckpoint";
+
+type ReprocessCheckpoint = {
+  mod: ReprocessMod;
+  /** ID dokumentů "revizni_zpravy", které tenhle běh (i přes případná
+   *  přerušení/pokračování) už úspěšně zpracoval. */
+  hotoveIds: string[];
+  /** ISO datum poslední aktualizace – jen informativní, appka checkpoint
+   *  nikdy sama neignoruje jen kvůli stáří (viz UI volba Pokračovat/Začít
+   *  znovu, kterou má uživatel plně pod kontrolou). */
+  aktualizovano: string;
+};
+
+function nacistReprocessCheckpoint(): ReprocessCheckpoint | null {
+  try {
+    const raw = localStorage.getItem(REPROCESS_CHECKPOINT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      (parsed.mod === "nove" || parsed.mod === "vse") &&
+      Array.isArray(parsed.hotoveIds) &&
+      parsed.hotoveIds.every((id: unknown) => typeof id === "string") &&
+      typeof parsed.aktualizovano === "string"
+    ) {
+      return parsed as ReprocessCheckpoint;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint) {
+  try {
+    localStorage.setItem(REPROCESS_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+  } catch {
+    // localStorage může být nedostupný (soukromé okno, zakázané úložiště…) –
+    // checkpoint se prostě neuloží. Přerušení/pokračování přes zavření karty
+    // pak nebude fungovat, ale samotné zpracování tím ohrožené není.
+  }
+}
+
+function smazatReprocessCheckpoint() {
+  try {
+    localStorage.removeItem(REPROCESS_CHECKPOINT_KEY);
+  } catch {
+    // viz ulozitReprocessCheckpoint
+  }
+}
+
 /**
  * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
  * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
@@ -796,13 +851,25 @@ let bezicíZpracovani: { rezim: ReprocessMod; zacatek: Date } | null = null;
  * přímo z Firestore) spustí synchronizujHistoriiZarizeni – tím se historie
  * zkrátí na poslední 2 zprávy (starší se smažou i s PDF ve Storage) a do
  * plánu se dosadí skutečně nejnovější zpráva.
+ *
+ * Běh lze tlačítkem "Přerušit zpracování" bezpečně zastavit – dokončí se
+ * soubor, který se právě zpracovává (jedna "skupina", viz processGroup),
+ * ale nezačne se další. Průběh (ID už hotových zpráv) se přitom průběžně
+ * ukládá do localStorage (viz ReprocessCheckpoint) – při příštím spuštění
+ * appka nabídne pokračovat jen se zbývajícími, místo aby začínala od nuly.
  */
 function RevizniZpravyReprocess() {
-  const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
+  const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
   // jen pro popisky v UI (progress text, souhrn), na volbu dávky uvnitř
   // handleReprocess nemá vliv (ten dostane režim přímo jako argument).
   const [bezicíRezim, setBezicíRezim] = useState<ReprocessMod>("nove");
+  // Nastavuje se kliknutím na "Přerušit zpracování". Čte se z ref, ne ze
+  // state – zajímá o ni běžící smyčka uvnitř handleReprocess (viz worker
+  // níž), a ref na rozdíl od state dá vždycky aktuální hodnotu i uvnitř už
+  // rozběhnutého closure bez čekání na překreslení.
+  const prerusitRef = useRef(false);
+  const [zadanoPreruseni, setZadanoPreruseni] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [results, setResults] = useState<ReprocessResult[]>([]);
   const [error, setError] = useState("");
@@ -820,13 +887,39 @@ function RevizniZpravyReprocess() {
   const [zablokovanoJinde] = useState<{ rezim: ReprocessMod; zacatek: Date } | null>(
     () => bezicíZpracovani
   );
+  // Nedokončený checkpoint z předchozího (přerušeného, nebo nikdy
+  // nedoběhlého) běhu – zjišťuje se/aktualizuje v nacistPocty spolu s
+  // počty, ať zbývající počet vždycky odpovídá aktuálním datům (viz
+  // "zbyva" – i mezitím přibylé nové zprávy se do něj započítají).
+  const [checkpoint, setCheckpoint] = useState<(ReprocessCheckpoint & { zbyva: number }) | null>(
+    null
+  );
 
   const nacistPocty = async () => {
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
       const aktualni = vyberAktualniZpravy(snap.docs);
+      const nove = aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       setPocetVse(aktualni.length);
-      setPocetNove(aktualni.filter((d) => !jeZpracovanoReprocessem(d)).length);
+      setPocetNove(nove.length);
+
+      const cp = nacistReprocessCheckpoint();
+      if (cp) {
+        const cilova = cp.mod === "vse" ? aktualni : nove;
+        const hotoveSet = new Set(cp.hotoveIds);
+        const zbyva = cilova.filter((d) => !hotoveSet.has(d.id)).length;
+        if (zbyva > 0) {
+          setCheckpoint({ ...cp, zbyva });
+        } else {
+          // Poslední zbývající zprávy mezitím zpracoval/smazal někdo jiný
+          // (jiná karta, jiný běh) – checkpoint je tak fakticky hotový.
+          smazatReprocessCheckpoint();
+          setCheckpoint(null);
+        }
+      } else {
+        setCheckpoint(null);
+      }
+
       setPocetChyba("");
     } catch (err) {
       setPocetChyba(
@@ -842,7 +935,7 @@ function RevizniZpravyReprocess() {
     nacistPocty();
   }, []);
 
-  const handleReprocess = async (mod: ReprocessMod) => {
+  const handleReprocess = async (mod: ReprocessMod, moznosti?: { pokracovat?: boolean }) => {
     if (bezicíZpracovani) {
       setError(
         "Zpracování už běží (spuštěné odjinud – jinou kartou/oknem, nebo dřívější návštěvou téhle stránky). Počkej, až doběhne, případně načti stránku znovu."
@@ -850,6 +943,16 @@ function RevizniZpravyReprocess() {
       return;
     }
 
+    const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint() : null;
+    // Pokračování dává smysl jen se stejným režimem, jaký checkpoint měl -
+    // jinak (nebo když se nepokračuje) se prostě začíná s prázdným setem
+    // hotových ID, jako dřív.
+    const hotoveIdsRunning = new Set<string>(
+      existujiciCheckpoint && existujiciCheckpoint.mod === mod ? existujiciCheckpoint.hotoveIds : []
+    );
+
+    prerusitRef.current = false;
+    setZadanoPreruseni(false);
     setStatus("processing");
     setBezicíRezim(mod);
     setResults([]);
@@ -862,7 +965,11 @@ function RevizniZpravyReprocess() {
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
       const aktualni = vyberAktualniZpravy(snap.docs);
-      const docs = mod === "vse" ? aktualni : aktualni.filter((d) => !jeZpracovanoReprocessem(d));
+      const cilova = mod === "vse" ? aktualni : aktualni.filter((d) => !jeZpracovanoReprocessem(d));
+      // Zbývající = cílová dávka MINUS to, co už (i z dřívějšího přerušeného
+      // běhu) hotové je – tím se do fronty samy započítají i mezitím
+      // přibylé nové zprávy, aniž by se znovu řešilo už hotové.
+      const docs = cilova.filter((d) => !hotoveIdsRunning.has(d.id));
       setProgress({ done: 0, total: docs.length });
 
       // Skupina podle pdf_storage_path – víc revizních zpráv (stránek) může
@@ -942,6 +1049,16 @@ function RevizniZpravyReprocess() {
                 [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()),
               });
 
+              // Checkpoint se ukládá průběžně po KAŽDÉ úspěšně zpracované
+              // zprávě (ne až na konci) – ať přerušení/pád prohlížeče
+              // uprostřed běhu neztratí rozdělanou práci.
+              hotoveIdsRunning.add(docSnap.id);
+              ulozitReprocessCheckpoint({
+                mod,
+                hotoveIds: Array.from(hotoveIdsRunning),
+                aktualizovano: new Date().toISOString(),
+              });
+
               // Dosazení do plánu (a případné prořezání starší historie) se
               // řeší až po přepočítání úplně všech zpráv, viz
               // synchronizujHistoriiZarizeni níž – ne tady za každou zprávu
@@ -977,12 +1094,17 @@ function RevizniZpravyReprocess() {
       let nextIndex = 0;
       async function worker() {
         while (nextIndex < groupEntries.length) {
+          // Kontrola AŽ TADY (ne uprostřed processGroup) – rozdělaný soubor,
+          // který se právě stahuje/parsuje/zapisuje, se dokončí celý, jen se
+          // nezačne další. Nejde tak vzniknout napůl zapsaný záznam.
+          if (prerusitRef.current) break;
           const entry = groupEntries[nextIndex];
           nextIndex += 1;
           await processGroup(entry);
         }
       }
       await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+      const prerušeno = prerusitRef.current;
 
       // Prořezání historie (starší než poslední 2 podle data provedení pryč,
       // včetně PDF ve Storage) a dosazení skutečně nejnovější zprávy do
@@ -1024,15 +1146,27 @@ function RevizniZpravyReprocess() {
       );
       setPruneSouhrn(souhrn);
 
-      setStatus("done");
-      // Prořezání (a případné mezitím nahrané nové zprávy) mohlo počet
-      // aktuálních zpráv změnit – ať číslo u tlačítka po dokončení sedí.
+      if (prerušeno) {
+        // Checkpoint se NEMAŽE – zůstává, aby příští kliknutí na tlačítko
+        // pokračovalo přesně od zbývajících záznamů.
+        setStatus("prerusene");
+      } else {
+        smazatReprocessCheckpoint();
+        setStatus("done");
+      }
+      // Prořezání (a případné mezitím nahrané nové zprávy, nebo přerušení)
+      // mohlo počet aktuálních/zbývajících zpráv změnit – ať čísla u
+      // tlačítek po doběhnutí sedí.
       await nacistPocty();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Nepodařilo se načíst uložené revizní zprávy."
       );
       setStatus("idle");
+      // Checkpoint z toho, co se stihlo zpracovat před chybou, zůstává (viz
+      // ukládání v úspěšné větvi processGroup) – ať zjištěný počet
+      // zbývajících sedí, i když tenhle běh skončil chybou uprostřed.
+      await nacistPocty();
     } finally {
       bezicíZpracovani = null;
     }
@@ -1083,67 +1217,117 @@ function RevizniZpravyReprocess() {
           </p>
         )}
 
-        <div className="flex flex-col items-start gap-2">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={() => handleReprocess("nove")}
-              disabled={status === "processing" || zablokovanoJinde !== null}
-              className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {status === "processing" && bezicíRezim === "nove" && pruneProgress.total > 0
-                ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
-                : status === "processing" && bezicíRezim === "nove"
-                  ? `Zpracovávám… (${progress.done}/${progress.total})`
-                  : pocetNove !== null
-                    ? `Zpracovat ${pocetNove} uložených revizních zpráv`
-                    : "Znovu zpracovat uložené revizní zprávy"}
-            </button>
-
-            <button
-              onClick={() => {
-                if (
-                  window.confirm(
-                    `Opravdu přepočítat úplně všech ${pocetVse ?? "?"} aktuálních revizních zpráv od nuly? ` +
-                      "Tohle je silnější a pomalejší akce než běžné doplnění nových - použij ji hlavně po změně parsovací logiky."
-                  )
-                ) {
-                  handleReprocess("vse");
-                }
-              }}
-              disabled={status === "processing" || zablokovanoJinde !== null || pocetVse === null}
-              title="Ignoruje, které zprávy už byly zpracované, a přepočítá úplně všechny."
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {status === "processing" && bezicíRezim === "vse" && pruneProgress.total > 0
-                ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
-                : status === "processing" && bezicíRezim === "vse"
-                  ? `Zpracovávám vše… (${progress.done}/${progress.total})`
-                  : `Zpracovat znovu úplně vše (${pocetVse ?? "…"})`}
-            </button>
+        {checkpoint && status !== "processing" ? (
+          <div className="flex flex-col items-start gap-2">
+            <div className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] text-status-warn">
+              Nedokončený běh (režim {checkpoint.mod === "vse" ? "úplně vše" : "jen nové"}),
+              naposledy aktualizován {new Date(checkpoint.aktualizovano).toLocaleString("cs-CZ")} –
+              zbývá {checkpoint.zbyva} zpráv.
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => handleReprocess(checkpoint.mod, { pokracovat: true })}
+                disabled={zablokovanoJinde !== null}
+                className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Pokračovat ve zpracování (zbývá {checkpoint.zbyva})
+              </button>
+              <button
+                onClick={() => {
+                  smazatReprocessCheckpoint();
+                  setCheckpoint(null);
+                }}
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50"
+              >
+                Začít znovu od začátku
+              </button>
+            </div>
           </div>
+        ) : (
+          <div className="flex flex-col items-start gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => handleReprocess("nove")}
+                disabled={status === "processing" || zablokovanoJinde !== null}
+                className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {status === "processing" && bezicíRezim === "nove" && pruneProgress.total > 0
+                  ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
+                  : status === "processing" && bezicíRezim === "nove"
+                    ? `Zpracovávám… (${progress.done}/${progress.total})`
+                    : pocetNove !== null
+                      ? `Zpracovat ${pocetNove} uložených revizních zpráv`
+                      : "Znovu zpracovat uložené revizní zprávy"}
+              </button>
 
-          {status !== "processing" &&
-            (pocetChyba ? (
-              <p className="text-[11px] text-red-500">{pocetChyba}</p>
-            ) : (
-              <p className="text-[11px] text-gray-400">
-                {pocetNove !== null
-                  ? `Ke zpracování: ${pocetNove} nových/dosud nezpracovaných revizních zpráv (z ${pocetVse} aktuálních celkem).`
-                  : "Zjišťuji počet zpráv ke zpracování…"}
-              </p>
-            ))}
-        </div>
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Opravdu přepočítat úplně všech ${pocetVse ?? "?"} aktuálních revizních zpráv od nuly? ` +
+                        "Tohle je silnější a pomalejší akce než běžné doplnění nových - použij ji hlavně po změně parsovací logiky."
+                    )
+                  ) {
+                    handleReprocess("vse");
+                  }
+                }}
+                disabled={status === "processing" || zablokovanoJinde !== null || pocetVse === null}
+                title="Ignoruje, které zprávy už byly zpracované, a přepočítá úplně všechny."
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {status === "processing" && bezicíRezim === "vse" && pruneProgress.total > 0
+                  ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
+                  : status === "processing" && bezicíRezim === "vse"
+                    ? `Zpracovávám vše… (${progress.done}/${progress.total})`
+                    : `Zpracovat znovu úplně vše (${pocetVse ?? "…"})`}
+              </button>
+
+              {status === "processing" && (
+                <button
+                  onClick={() => {
+                    prerusitRef.current = true;
+                    setZadanoPreruseni(true);
+                  }}
+                  disabled={zadanoPreruseni}
+                  className="rounded-md border border-status-overdue px-3 py-1.5 text-[12px] font-semibold text-status-overdue transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {zadanoPreruseni ? "Přerušuji… (dokončuji rozdělaný soubor)" : "Přerušit zpracování"}
+                </button>
+              )}
+            </div>
+
+            {status !== "processing" &&
+              (pocetChyba ? (
+                <p className="text-[11px] text-red-500">{pocetChyba}</p>
+              ) : (
+                <p className="text-[11px] text-gray-400">
+                  {pocetNove !== null
+                    ? `Ke zpracování: ${pocetNove} nových/dosud nezpracovaných revizních zpráv (z ${pocetVse} aktuálních celkem).`
+                    : "Zjišťuji počet zpráv ke zpracování…"}
+                </p>
+              ))}
+          </div>
+        )}
 
         {error && <p className="text-[12.5px] text-red-600">{error}</p>}
 
-        {status === "done" && (
+        {(status === "done" || status === "prerusene") && (
           <>
-            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
-              Zpracováno {results.length}{" "}
-              {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
-              zpráv: {uspesneCount} úspěšně aktualizováno
-              {chybaCount > 0 && `, ${chybaCount} selhalo`}.
-            </div>
+            {status === "prerusene" ? (
+              <div className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] font-semibold text-status-warn">
+                Přerušeno – zpracováno {progress.done} z {progress.total}{" "}
+                {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
+                zpráv ({uspesneCount} úspěšně{chybaCount > 0 ? `, ${chybaCount} selhalo` : ""}).
+                Zbytek zůstal uložený jako rozdělaná dávka – pokračuj tlačítkem výš.
+              </div>
+            ) : (
+              <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
+                Zpracováno {results.length}{" "}
+                {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
+                zpráv: {uspesneCount} úspěšně aktualizováno
+                {chybaCount > 0 && `, ${chybaCount} selhalo`}.
+              </div>
+            )}
 
             {pruneSouhrn && (
               <div className="rounded-md border border-green-100 bg-green-50 px-3 py-2 text-[12.5px] text-status-ok">
