@@ -736,6 +736,26 @@ function vyberAktualniZpravy(
   return vybrane;
 }
 
+// Nastaví se jen při úspěšném zápisu z TOHOHLE tlačítka (ne při prvním
+// nahrání – viz REPROCESS_MARKER_FIELD komentář u jeZpracovanoReprocessem
+// níž), takže nově nahrané zprávy jím zpočátku nemají označené.
+const REPROCESS_MARKER_FIELD = "naposledy_zpracovano_reprocessem";
+
+/**
+ * Jestli tuhle zprávu tlačítko "Znovu zpracovat" už někdy úspěšně
+ * zpracovalo. Nejde o to, jestli má zpráva vyplněná parsovaná pole – ta má
+ * vyplněná i úplně nová, čerstvě nahraná zpráva (parsuje se rovnou při
+ * nahrání). Jde o to, jestli ji tohle konkrétní tlačítko už "viděla" – ať
+ * default dávka ("nové") obsahuje jen zprávy, které ještě nikdy neprošly
+ * přeparsováním touhle cestou (typicky čerstvě přibylé), a ne všechny
+ * tisíce, co se stejně nezměnily od posledního běhu.
+ */
+function jeZpracovanoReprocessem(d: QueryDocumentSnapshot<DocumentData>): boolean {
+  return d.data()[REPROCESS_MARKER_FIELD] instanceof Timestamp;
+}
+
+type ReprocessMod = "nove" | "vse";
+
 /**
  * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
  * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
@@ -747,30 +767,43 @@ function vyberAktualniZpravy(
  * revizních zpráv může odkazovat na stejný nahraný soubor (víc zařízení na
  * stránku) – soubor se proto stahuje a parsuje jen jednou na skupinu.
  *
+ * Dva režimy (viz ReprocessMod): "nove" (výchozí, přes hlavní tlačítko)
+ * zpracuje jen zprávy, které ještě nemají REPROCESS_MARKER_FIELD – typicky
+ * čerstvě přibylé od posledního běhu. "vse" (přes menší odkaz s
+ * potvrzením) ignoruje marker a přepočítá úplně všechny aktuální zprávy od
+ * nuly – hodí se při změně parsovací logiky, kdy i dřív už zpracované
+ * zprávy potřebují nové/opravené hodnoty.
+ *
  * Po přepočítání polí navíc u KAŽDÉHO dotčeného čísla zařízení (aktuálního i
  * historicky předchozího – to se řeší samo, protože sync čte fresh data
  * přímo z Firestore) spustí synchronizujHistoriiZarizeni – tím se historie
  * zkrátí na poslední 2 zprávy (starší se smažou i s PDF ve Storage) a do
- * plánu se dosadí skutečně nejnovější zpráva. Tohle tlačítko tak zároveň
- * slouží jako jednorázové prořezání i pro zprávy uložené předtím, než appka
- * historii omezovat začala.
+ * plánu se dosadí skutečně nejnovější zpráva.
  */
 function RevizniZpravyReprocess() {
   const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
+  // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
+  // jen pro popisky v UI (progress text, souhrn), na volbu dávky uvnitř
+  // handleReprocess nemá vliv (ten dostane režim přímo jako argument).
+  const [bezicíRezim, setBezicíRezim] = useState<ReprocessMod>("nove");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [results, setResults] = useState<ReprocessResult[]>([]);
   const [error, setError] = useState("");
   const [pruneSouhrn, setPruneSouhrn] = useState<PruneSouhrn | null>(null);
   const [pruneProgress, setPruneProgress] = useState({ done: 0, total: 0 });
-  // Kolik zpráv by teď tlačítko zpracovalo – null = ještě se nezjistilo
+  // Kolik zpráv by teď zpracovalo výchozí (jen "nové") tlačítko, a kolik by
+  // jich zpracovalo úplné přezpracování všeho – null = ještě se nezjistilo
   // (počáteční načítání) nebo se zjistit nepodařilo.
-  const [pocetKeZpracovani, setPocetKeZpracovani] = useState<number | null>(null);
+  const [pocetNove, setPocetNove] = useState<number | null>(null);
+  const [pocetVse, setPocetVse] = useState<number | null>(null);
   const [pocetChyba, setPocetChyba] = useState("");
 
-  const nacistPocetKeZpracovani = async () => {
+  const nacistPocty = async () => {
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
-      setPocetKeZpracovani(vyberAktualniZpravy(snap.docs).length);
+      const aktualni = vyberAktualniZpravy(snap.docs);
+      setPocetVse(aktualni.length);
+      setPocetNove(aktualni.filter((d) => !jeZpracovanoReprocessem(d)).length);
       setPocetChyba("");
     } catch (err) {
       setPocetChyba(
@@ -779,15 +812,16 @@ function RevizniZpravyReprocess() {
     }
   };
 
-  // Zjištění počtu se stejnou logikou (vyberAktualniZpravy), jakou pak
-  // použije samotné zpracování – ať se číslo u tlačítka shoduje s tím, co
-  // appka po kliknutí skutečně stáhne a naparsuje.
+  // Zjištění počtů se stejnou logikou (vyberAktualniZpravy +
+  // jeZpracovanoReprocessem), jakou pak použije samotné zpracování – ať
+  // čísla u tlačítek sedí s tím, co appka po kliknutí skutečně zpracuje.
   useEffect(() => {
-    nacistPocetKeZpracovani();
+    nacistPocty();
   }, []);
 
-  const handleReprocess = async () => {
+  const handleReprocess = async (mod: ReprocessMod) => {
     setStatus("processing");
+    setBezicíRezim(mod);
     setResults([]);
     setError("");
     setPruneSouhrn(null);
@@ -796,7 +830,8 @@ function RevizniZpravyReprocess() {
 
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
-      const docs = vyberAktualniZpravy(snap.docs);
+      const aktualni = vyberAktualniZpravy(snap.docs);
+      const docs = mod === "vse" ? aktualni : aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       setProgress({ done: 0, total: docs.length });
 
       // Skupina podle pdf_storage_path – víc revizních zpráv (stránek) může
@@ -871,7 +906,10 @@ function RevizniZpravyReprocess() {
             });
           } else {
             try {
-              await updateDoc(docSnap.ref, revizniZpravaToFirestoreFields(fresh));
+              await updateDoc(docSnap.ref, {
+                ...revizniZpravaToFirestoreFields(fresh),
+                [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()),
+              });
 
               // Dosazení do plánu (a případné prořezání starší historie) se
               // řeší až po přepočítání úplně všech zpráv, viz
@@ -958,7 +996,7 @@ function RevizniZpravyReprocess() {
       setStatus("done");
       // Prořezání (a případné mezitím nahrané nové zprávy) mohlo počet
       // aktuálních zpráv změnit – ať číslo u tlačítka po dokončení sedí.
-      await nacistPocetKeZpracovani();
+      await nacistPocty();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Nepodařilo se načíst uložené revizní zprávy."
@@ -990,30 +1028,57 @@ function RevizniZpravyReprocess() {
           doplní/opraví automaticky. U každého zařízení se přeparsuje jen AKTUÁLNÍ (nejnovější)
           zpráva – ta předchozí zůstává v appce dál viditelná (šedý odznak), jen se zbytečně znovu
           nestahuje. Zároveň u každého čísla zařízení zkrátí historii na poslední 2 revizní zprávy
-          (podle data provedení) – starší smaže i s PDF ve Storage.
+          (podle data provedení) – starší smaže i s PDF ve Storage. Výchozí tlačítko zpracuje jen
+          zprávy, které tudy ještě neprošly (typicky nově přibylé) – pro přepočítání úplně všeho
+          (např. po změně parsovací logiky) použij odkaz níž.
         </p>
 
-        <div className="flex flex-col items-start gap-1.5">
-          <button
-            onClick={handleReprocess}
-            disabled={status === "processing"}
-            className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {status === "processing" && pruneProgress.total > 0
-              ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
-              : status === "processing"
-                ? `Zpracovávám… (${progress.done}/${progress.total})`
-                : pocetKeZpracovani !== null
-                  ? `Zpracovat ${pocetKeZpracovani} uložených revizních zpráv`
-                  : "Znovu zpracovat uložené revizní zprávy"}
-          </button>
+        <div className="flex flex-col items-start gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => handleReprocess("nove")}
+              disabled={status === "processing"}
+              className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {status === "processing" && bezicíRezim === "nove" && pruneProgress.total > 0
+                ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
+                : status === "processing" && bezicíRezim === "nove"
+                  ? `Zpracovávám… (${progress.done}/${progress.total})`
+                  : pocetNove !== null
+                    ? `Zpracovat ${pocetNove} uložených revizních zpráv`
+                    : "Znovu zpracovat uložené revizní zprávy"}
+            </button>
+
+            <button
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Opravdu přepočítat úplně všech ${pocetVse ?? "?"} aktuálních revizních zpráv od nuly? ` +
+                      "Tohle je silnější a pomalejší akce než běžné doplnění nových - použij ji hlavně po změně parsovací logiky."
+                  )
+                ) {
+                  handleReprocess("vse");
+                }
+              }}
+              disabled={status === "processing" || pocetVse === null}
+              title="Ignoruje, které zprávy už byly zpracované, a přepočítá úplně všechny."
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {status === "processing" && bezicíRezim === "vse" && pruneProgress.total > 0
+                ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
+                : status === "processing" && bezicíRezim === "vse"
+                  ? `Zpracovávám vše… (${progress.done}/${progress.total})`
+                  : `Zpracovat znovu úplně vše (${pocetVse ?? "…"})`}
+            </button>
+          </div>
+
           {status !== "processing" &&
             (pocetChyba ? (
               <p className="text-[11px] text-red-500">{pocetChyba}</p>
             ) : (
               <p className="text-[11px] text-gray-400">
-                {pocetKeZpracovani !== null
-                  ? `Ke zpracování: ${pocetKeZpracovani} revizních zpráv (jen aktuální/nejnovější u každého zařízení, starší historické se nepočítají).`
+                {pocetNove !== null
+                  ? `Ke zpracování: ${pocetNove} nových/dosud nezpracovaných revizních zpráv (z ${pocetVse} aktuálních celkem).`
                   : "Zjišťuji počet zpráv ke zpracování…"}
               </p>
             ))}
@@ -1024,8 +1089,9 @@ function RevizniZpravyReprocess() {
         {status === "done" && (
           <>
             <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
-              Zpracováno {results.length} uložených revizních zpráv: {uspesneCount} úspěšně
-              aktualizováno
+              Zpracováno {results.length}{" "}
+              {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
+              zpráv: {uspesneCount} úspěšně aktualizováno
               {chybaCount > 0 && `, ${chybaCount} selhalo`}.
             </div>
 
