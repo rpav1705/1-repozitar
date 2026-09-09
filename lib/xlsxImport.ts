@@ -222,10 +222,14 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
     const aktivumRaw = aktivumIndex >= 0 ? cellText(row[aktivumIndex]) : "";
     const puvodniRaw = puvodniAktivumIndex >= 0 ? cellText(row[puvodniAktivumIndex]) : "";
 
+    // V tomto exportu drží skutečné (revizní zprávou ověřitelné) číslo
+    // zařízení sloupec "Původní aktivum", ne "Aktivum" – ten obsahuje jiný
+    // interní kód. "Aktivum" proto slouží jen jako poslední záchranná
+    // hodnota, kdyby "Původní aktivum" v souboru chybělo.
     const cislo_zarizeni =
       extractEquipmentNumber(codeRaw) ??
-      extractEquipmentNumber(aktivumRaw) ??
-      (aktivumRaw || puvodniRaw || "");
+      extractEquipmentNumber(puvodniRaw) ??
+      (puvodniRaw || aktivumRaw || "");
 
     const termin = parseFlexibleDate(row[dateIndex]);
     const popis = cellText(row[assetDescIndex ?? fallbackDescIndex]) || codeRaw;
