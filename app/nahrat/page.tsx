@@ -20,7 +20,7 @@ import {
 } from "firebase/firestore";
 import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
-import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
+import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/lib/pdfRevizniZprava";
 import { revizniZpravaToFirestoreFields } from "@/lib/revizniZpravyFirestore";
 import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { describeSaveError } from "@/lib/friendlyError";
@@ -672,12 +672,20 @@ type ReprocessResult = {
   cislo_zarizeni: string;
   stav: ReprocessStav;
   poznamka: string;
+  /** Jen u úspěšně přepočítaných zpráv (viz VysledekRevize v lib/pdfRevizniZprava.ts). */
+  vysledekRevize?: VysledekRevize;
 };
 
 const REPROCESS_STAV_LABELS: Record<ReprocessStav, { label: string; className: string }> = {
   aktualizovano: { label: "Aktualizováno", className: "text-status-ok" },
   aktualizovano_i_v_planu: { label: "Aktualizováno i v plánu", className: "text-status-ok" },
   chyba: { label: "Selhalo", className: "text-status-overdue" },
+};
+
+const VYSLEDEK_REVIZE_LABELS: Record<VysledekRevize, { label: string; className: string }> = {
+  OK: { label: "OK", className: "text-status-ok" },
+  NOK: { label: "NOK", className: "text-status-overdue" },
+  KE_KONTROLE: { label: "Ke kontrole", className: "text-status-warn" },
 };
 
 type PruneSouhrn = {
@@ -876,6 +884,7 @@ function RevizniZpravyReprocess() {
                 cislo_zarizeni: fresh.cislo_zarizeni,
                 stav: "aktualizovano",
                 poznamka: "",
+                vysledekRevize: fresh.vysledek_revize,
               });
             } catch (err) {
               reportDoc({
@@ -960,6 +969,11 @@ function RevizniZpravyReprocess() {
 
   const uspesneCount = results.filter((r) => r.stav !== "chyba").length;
   const chybaCount = results.filter((r) => r.stav === "chyba").length;
+  const vysledekOkCount = results.filter((r) => r.vysledekRevize === "OK").length;
+  const vysledekNokCount = results.filter((r) => r.vysledekRevize === "NOK").length;
+  const vysledekKeKontroleZarizeni = results
+    .filter((r) => r.vysledekRevize === "KE_KONTROLE")
+    .map((r) => r.cislo_zarizeni);
 
   return (
     <div className="overflow-hidden rounded-lg bg-white shadow-sm">
@@ -1024,6 +1038,31 @@ function RevizniZpravyReprocess() {
               </div>
             )}
 
+            {uspesneCount > 0 && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-[12.5px] text-gray-700">
+                Výsledek revize (z {uspesneCount} úspěšně přepočítaných): {vysledekOkCount} OK,{" "}
+                {vysledekNokCount} NOK, {vysledekKeKontroleZarizeni.length} ke kontrole (nerozpoznaná
+                formulace pole „Celkové hodnocení“).
+                {vysledekKeKontroleZarizeni.length > 0 && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer font-semibold text-status-warn">
+                      Čísla zařízení ke kontrole
+                    </summary>
+                    <ul className="mt-1 list-inside list-disc">
+                      {vysledekKeKontroleZarizeni.slice(0, 20).map((cislo, i) => (
+                        <li key={i}>{cislo || "(bez čísla zařízení)"}</li>
+                      ))}
+                    </ul>
+                    {vysledekKeKontroleZarizeni.length > 20 && (
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        Zobrazeno prvních 20 z {vysledekKeKontroleZarizeni.length}.
+                      </p>
+                    )}
+                  </details>
+                )}
+              </div>
+            )}
+
             {results.length > 0 && (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-[12.5px]">
@@ -1033,6 +1072,7 @@ function RevizniZpravyReprocess() {
                       <th className="py-1.5 pr-4 font-semibold">Strana</th>
                       <th className="py-1.5 pr-4 font-semibold">Číslo zařízení</th>
                       <th className="py-1.5 pr-4 font-semibold">Výsledek</th>
+                      <th className="py-1.5 pr-4 font-semibold">Výsledek revize</th>
                       <th className="py-1.5 pr-4 font-semibold">Poznámka</th>
                     </tr>
                   </thead>
@@ -1044,6 +1084,13 @@ function RevizniZpravyReprocess() {
                         <td className="py-1.5 pr-4">{r.cislo_zarizeni}</td>
                         <td className={`py-1.5 pr-4 font-semibold ${REPROCESS_STAV_LABELS[r.stav].className}`}>
                           {REPROCESS_STAV_LABELS[r.stav].label}
+                        </td>
+                        <td
+                          className={`py-1.5 pr-4 font-semibold ${
+                            r.vysledekRevize ? VYSLEDEK_REVIZE_LABELS[r.vysledekRevize].className : ""
+                          }`}
+                        >
+                          {r.vysledekRevize ? VYSLEDEK_REVIZE_LABELS[r.vysledekRevize].label : "—"}
                         </td>
                         <td className="py-1.5 pr-4 text-gray-500">{r.poznamka || "—"}</td>
                       </tr>

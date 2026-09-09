@@ -19,6 +19,8 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
     datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
     novy_termin: Timestamp.fromDate(zprava.novy_termin),
     celkove_hodnoceni: zprava.celkove_hodnoceni,
+    vysledek_revize: zprava.vysledek_revize,
+    zjistena_zavada: zprava.zjistena_zavada,
     technik_jmeno: zprava.technik_jmeno,
     technik_cislo_opravneni: zprava.technik_cislo_opravneni,
   };

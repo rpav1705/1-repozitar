@@ -158,6 +158,8 @@ async function synchronizujPlanovanouRevizi(
     posledni_revize_vcas: posledniRevizeVcas,
     posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
+    vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
+    zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
     predchozi_revizni_zprava_url: predchozi ? predchozi.snap.data().pdf_url ?? null : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,

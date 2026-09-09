@@ -1,12 +1,32 @@
 import * as pdfjsLib from "pdfjs-dist";
 import { parseFlexibleDate } from "@/lib/parseDate";
 
+/**
+ * Klasifikace "celkove_hodnoceni" do tří stavů – appka nikdy nemá jistě
+ * vědět, že je zpráva v pořádku, pokud text přesně neodpovídá očekávané
+ * formulaci. "KE_KONTROLE" proto pokrývá jak nerozpoznanou/neznámou
+ * formulaci (např. "Vyhovuje s omezením" dle ČSN 33 1600 ed.2), tak úplně
+ * chybějící pole – ať se to nikdy tiše nezamíchá mezi OK, ani mezi NOK.
+ */
+export type VysledekRevize = "OK" | "NOK" | "KE_KONTROLE";
+
 export type ParsedRevizniZprava = {
   cislo_zarizeni: string;
   datum_provedeni: Date;
   novy_termin: Date;
   /** "Vyhovuje" / "Nevyhovuje" apod. – prázdné, pokud se nepodařilo rozpoznat. */
   celkove_hodnoceni: string;
+  /** Klasifikace celkove_hodnoceni – viz typ VysledekRevize. */
+  vysledek_revize: VysledekRevize;
+  /**
+   * Text z pole "Zjištěná závada/poznámka:" – null, pokud je pole prázdné
+   * (typicky u zpráv s výsledkem "Vyhovuje") nebo se nepodařilo najít.
+   * Appka zatím ověřila jen šablonu "spotrebic" (viz
+   * extractZjistenaZavadaSpotrebic) a jen na zprávě s prázdným polem –
+   * skutečný formát vyplněného pole (víceřádkový text u NOK zprávy) zatím
+   * nebyl k dispozici, takže se může upřesnit, až se objeví reálný příklad.
+   */
+  zjistena_zavada: string | null;
   /** Jméno revizního technika – null, pokud se nepodařilo rozpoznat (nekritické pole). */
   technik_jmeno: string | null;
   /** Evidenční číslo oprávnění revizního technika – null, pokud se nepodařilo rozpoznat. */
@@ -14,6 +34,19 @@ export type ParsedRevizniZprava = {
   /** 1-based číslo stránky uvnitř nahraného PDF. */
   stranka: number;
 };
+
+/**
+ * Přesná shoda "vyhovuje" (case-insensitive, ořízlé) → OK. Text OBSAHUJÍCÍ
+ * "nevyhovuje" → NOK (kontrola na přesnou shodu s "vyhovuje" musí být PRVNÍ,
+ * jinak by "nevyhovuje" jako podřetězec obsahující "vyhovuje" vyšlo jako OK).
+ * Cokoli jiného (jiná formulace, nebo prázdné/nenalezené pole) → KE_KONTROLE.
+ */
+function klasifikujVysledekRevize(celkoveHodnoceni: string): VysledekRevize {
+  const text = celkoveHodnoceni.trim().toLowerCase();
+  if (text === "vyhovuje") return "OK";
+  if (text.includes("nevyhovuje")) return "NOK";
+  return "KE_KONTROLE";
+}
 
 export type SkippedPage = {
   stranka: number;
@@ -207,12 +240,39 @@ function extractCelkoveHodnoceniSpotrebic(lines: string[]): string {
   return "";
 }
 
+/**
+ * "Zjištěná závada/poznámka:" je ve spodní části stránky mezi popisnou
+ * sekcí "Výsledek revize:" a řádkem "Revize byla provedena dne:". Na
+ * ověřené (OK) zprávě je pole prázdné – za popiskem už nic není a hned
+ * následuje další popisek. Hodnota se tedy bere jako text za popiskem na
+ * stejném řádku, případně (kdyby dlouhá závada přetékala na další řádky)
+ * všechno až do řádku "Revize byla provedena dne:" – to ale zatím nebylo
+ * možné ověřit na žádné reálné NOK zprávě.
+ */
+function extractZjistenaZavadaSpotrebic(lines: string[]): string | null {
+  const idx = lines.findIndex((l) => /Zjištěná\s*závada\s*\/?\s*poznámka\s*:/i.test(l));
+  if (idx === -1) return null;
+
+  const afterLabel = lines[idx].split(/Zjištěná\s*závada\s*\/?\s*poznámka\s*:/i)[1]?.trim() ?? "";
+  const parts = afterLabel ? [afterLabel] : [];
+
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (/Revize byla provedena dne:/.test(lines[i])) break;
+    const text = lines[i].trim();
+    if (text) parts.push(text);
+  }
+
+  const zavada = parts.join(" ").trim();
+  return zavada.length > 0 ? zavada : null;
+}
+
 function extractSpotrebicZprava(lines: string[]) {
   return {
     cislo_zarizeni: extractInventarniCisloSpotrebic(lines),
     datum_provedeni: extractDatumProvedeniSpotrebic(lines),
     novy_termin: extractTerminSpotrebic(lines),
     celkove_hodnoceni: extractCelkoveHodnoceniSpotrebic(lines),
+    zjistena_zavada: extractZjistenaZavadaSpotrebic(lines),
     technik_jmeno: extractTechnikJmenoSpotrebic(lines),
     technik_cislo_opravneni: extractCisloOpravneniSpotrebic(lines),
   };
@@ -303,6 +363,9 @@ function extractStrojZprava(lines: string[]) {
     datum_provedeni: extractDatumProvedeniStroj(lines),
     novy_termin: extractTerminStroj(lines),
     celkove_hodnoceni: extractPosudekStroj(lines),
+    // Rozvržení pole se závadou/poznámkou u téhle šablony zatím nebylo
+    // ověřené na žádné reálné zprávě – dokud nebude, necháváme null.
+    zjistena_zavada: null as string | null,
     technik_jmeno: extractTechnikJmenoStroj(lines),
     technik_cislo_opravneni: extractCisloOpravneniStroj(lines),
   };
@@ -374,6 +437,8 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
       datum_provedeni: extracted.datum_provedeni,
       novy_termin: extracted.novy_termin,
       celkove_hodnoceni: extracted.celkove_hodnoceni,
+      vysledek_revize: klasifikujVysledekRevize(extracted.celkove_hodnoceni),
+      zjistena_zavada: extracted.zjistena_zavada,
       technik_jmeno: extracted.technik_jmeno,
       technik_cislo_opravneni: extracted.technik_cislo_opravneni,
       stranka,

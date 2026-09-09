@@ -15,6 +15,7 @@ import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
 import { db } from "@/lib/firebase";
+import { VysledekRevize } from "@/lib/pdfRevizniZprava";
 
 const PLAN_COLLECTION = "planovane_revize";
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
@@ -44,7 +45,60 @@ type PlanRow = {
   predchoziRevizniZpravaUrl: string | null;
   /** Datum provedení předchozí revizní zprávy, nebo null. */
   predchoziDatumProvedeni: Date | null;
+  /** Klasifikace "Celkové hodnocení" poslední revizní zprávy, nebo null (žádná zpráva/starší data bez backfillu). */
+  vysledekRevize: VysledekRevize | null;
+  /** Text zjištěné závady z poslední revizní zprávy, nebo null. */
+  zjistenaZavada: string | null;
 };
+
+const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: string }> = {
+  OK: { label: "OK", className: "border-status-ok text-status-ok bg-green-50" },
+  NOK: { label: "NOK", className: "border-status-overdue text-status-overdue bg-red-50" },
+  KE_KONTROLE: { label: "Ke kontrole", className: "border-status-warn text-status-warn bg-orange-50" },
+};
+
+/**
+ * Badge s výsledkem revize + (u NOK/Ke kontrole) zjištěnou závadou – zkrácenou
+ * na jeden řádek s "…", ať sloupec nerozbíjí šířku tabulky. Najetí myší
+ * ukáže celý text (title), kliknutí ho rozbalí/sbalí přímo v buňce (pro
+ * dotykové ovládání, kde title nefunguje).
+ */
+function VysledekReviseBadge({
+  vysledek,
+  zavada,
+}: {
+  vysledek: VysledekRevize | null;
+  zavada: string | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!vysledek) return <span className="text-gray-300">—</span>;
+
+  const meta = VYSLEDEK_REVIZE_META[vysledek];
+  const zobrazitZavadu = vysledek !== "OK" && zavada;
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <span
+        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
+      >
+        {meta.label}
+      </span>
+      {zobrazitZavadu && (
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          title={zavada}
+          className={`text-left text-[11px] text-gray-500 hover:text-gray-700 ${
+            expanded ? "whitespace-normal" : "max-w-[220px] truncate"
+          }`}
+        >
+          {zavada}
+        </button>
+      )}
+    </div>
+  );
+}
 
 type RowStatus = "overdue" | "warn" | "planned" | "missing";
 
@@ -178,6 +232,13 @@ function useDashboardData() {
               record.predchozi_datum_provedeni instanceof Timestamp
                 ? record.predchozi_datum_provedeni.toDate()
                 : null,
+            vysledekRevize:
+              record.vysledek_revize === "OK" ||
+              record.vysledek_revize === "NOK" ||
+              record.vysledek_revize === "KE_KONTROLE"
+                ? record.vysledek_revize
+                : null,
+            zjistenaZavada: typeof record.zjistena_zavada === "string" ? record.zjistena_zavada : null,
           };
         });
 
@@ -436,6 +497,7 @@ function DashboardOverview() {
                       <th className="py-2 pr-4 font-semibold">Provedeno dne</th>
                       <th className="py-2 pr-4 font-semibold">Revizi provedl</th>
                       <th className="py-2 pr-4 font-semibold">Číslo oprávnění</th>
+                      <th className="py-2 pr-4 font-semibold">Výsledek revize</th>
                       <th className="py-2 pr-[18px] font-semibold">Stav</th>
                     </tr>
                   </thead>
@@ -462,6 +524,9 @@ function DashboardOverview() {
                           </td>
                           <td className="py-2 pr-4">{row.technikJmeno || "—"}</td>
                           <td className="py-2 pr-4">{row.technikCisloOpravneni || "—"}</td>
+                          <td className="py-2 pr-4">
+                            <VysledekReviseBadge vysledek={row.vysledekRevize} zavada={row.zjistenaZavada} />
+                          </td>
                           <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>
                             {meta.label}
                             {row.posledniRevizniZpravaUrl && (
