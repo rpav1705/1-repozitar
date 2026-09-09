@@ -1,7 +1,9 @@
 import {
   collection,
   deleteDoc,
+  doc,
   DocumentData,
+  getDoc,
   getDocs,
   query,
   QueryDocumentSnapshot,
@@ -31,6 +33,45 @@ function toDate(value: unknown): Date | null {
 }
 
 type Radek = { snap: QueryDocumentSnapshot<DocumentData>; datumProvedeni: Date };
+
+/**
+ * Smaže dané záznamy v "revizni_zpravy" a k nim patřící PDF ve Storage –
+ * soubor jen když už na něj neodkazuje žádná JINÁ zpráva (jeden nahraný PDF
+ * může obsahovat revize pro víc zařízení na různých stránkách). Sdílené mezi
+ * synchronizujHistoriiZarizeni (mazání nad HISTORIE_LIMIT) a
+ * smazNeaktivniZarizeni (mazání úplně všech zpráv zařízení).
+ */
+async function smazZpravy(
+  docs: QueryDocumentSnapshot<DocumentData>[]
+): Promise<{ smazanoZaznamu: number; smazanoSouboru: number }> {
+  let smazanoZaznamu = 0;
+  let smazanoSouboru = 0;
+
+  for (const d of docs) {
+    const storagePath = d.data().pdf_storage_path;
+    const path = typeof storagePath === "string" ? storagePath : null;
+
+    await deleteDoc(d.ref);
+    smazanoZaznamu += 1;
+
+    if (path) {
+      const jesteUzito = await getDocs(
+        query(collection(db, "revizni_zpravy"), where("pdf_storage_path", "==", path))
+      );
+      if (jesteUzito.empty) {
+        try {
+          await deleteObject(ref(storage, path));
+          smazanoSouboru += 1;
+        } catch {
+          // Soubor už ve Storage nemusí existovat (např. smazaný ručně přes
+          // konzoli) – nekritické, Firestore historie je i tak uklizená.
+        }
+      }
+    }
+  }
+
+  return { smazanoZaznamu, smazanoSouboru };
+}
 
 /**
  * Prořízne historii revizních zpráv daného čísla zařízení na posledních
@@ -65,32 +106,7 @@ export async function synchronizujHistoriiZarizeni(
   const ponechane = radky.slice(0, HISTORIE_LIMIT);
   const kSmazani = radky.slice(HISTORIE_LIMIT);
 
-  let smazanoZaznamu = 0;
-  let smazanoSouboru = 0;
-
-  for (const radek of kSmazani) {
-    const storagePath = radek.snap.data().pdf_storage_path;
-    const path = typeof storagePath === "string" ? storagePath : null;
-
-    await deleteDoc(radek.snap.ref);
-    smazanoZaznamu += 1;
-
-    if (path) {
-      const jesteUzito = await getDocs(
-        query(collection(db, "revizni_zpravy"), where("pdf_storage_path", "==", path))
-      );
-      if (jesteUzito.empty) {
-        try {
-          await deleteObject(ref(storage, path));
-          smazanoSouboru += 1;
-        } catch {
-          // Soubor už ve Storage nemusí existovat (např. smazaný ručně přes
-          // konzoli) – nekritické, Firestore historie je i tak uklizená.
-        }
-      }
-    }
-  }
-
+  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(kSmazani.map((r) => r.snap));
   const planSynchronizovan = await synchronizujPlanovanouRevizi(cisloZarizeni, ponechane);
 
   return { smazanoZaznamu, smazanoSouboru, planSynchronizovan };
@@ -148,4 +164,52 @@ async function synchronizujPlanovanouRevizi(
   });
 
   return true;
+}
+
+export type VysledekMazaniNeaktivniho = {
+  /** Jestli záznam v "planovane_revize" s tímhle ID vůbec existoval a byl smazán. */
+  planSmazan: boolean;
+  smazanoZaznamu: number;
+  smazanoSouboru: number;
+};
+
+/**
+ * Smaže záznam v "planovane_revize" pro dané zařízení (identifikované PU
+ * odvozeným ID dokumentu – stejné ID, podle kterého import .xls záznamy
+ * upsertuje). Jedno číslo zařízení může mít víc záznamů v plánu (víc typů
+ * revize, různá PÚ) – revizní zprávy jsou ale spárované jen podle čísla
+ * zařízení, ne podle konkrétního PÚ, takže by jejich smazáním mohly přijít
+ * o data i zprávy patřící k JINÉMU, pořád aktivnímu typu revize stejného
+ * zařízení. Revizní zprávy (Firestore i PDF ve Storage) se proto smažou jen
+ * tehdy, když po smazání téhle plánované revize u čísla zařízení nezůstal
+ * v plánu už VŮBEC ŽÁDNÝ jiný záznam.
+ *
+ * Používá se pro řádky z importu .xls se sloupcem "Stav" = "INACTIVE" (viz
+ * lib/xlsxImport.ts) – appka taková zařízení dál v sobě nedrží.
+ */
+export async function smazNeaktivniZarizeni(
+  planDocId: string,
+  cisloZarizeni: string
+): Promise<VysledekMazaniNeaktivniho> {
+  const planRef = doc(db, "planovane_revize", planDocId);
+  const planSnap = await getDoc(planRef);
+  if (!planSnap.exists()) {
+    return { planSmazan: false, smazanoZaznamu: 0, smazanoSouboru: 0 };
+  }
+
+  await deleteDoc(planRef);
+
+  const zbyleSnap = await getDocs(
+    query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cisloZarizeni))
+  );
+  if (!zbyleSnap.empty) {
+    return { planSmazan: true, smazanoZaznamu: 0, smazanoSouboru: 0 };
+  }
+
+  const revSnap = await getDocs(
+    query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
+  );
+  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(revSnap.docs);
+
+  return { planSmazan: true, smazanoZaznamu, smazanoSouboru };
 }

@@ -22,7 +22,7 @@ import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
 import { revizniZpravaToFirestoreFields } from "@/lib/revizniZpravyFirestore";
-import { synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
+import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { describeSaveError } from "@/lib/friendlyError";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -51,13 +51,23 @@ function previewDocId(row: ParsedPlanRow): string {
   return puId || "(náhodné – chybí PÚ)";
 }
 
+type NeaktivniVysledek = {
+  zpracovano: number;
+  planSmazano: number;
+  zpravSmazano: number;
+  souboruSmazano: number;
+  bezPu: number;
+};
+
 function PlanUpload() {
   const [file, setFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedPlanRow[]>([]);
   const [skipped, setSkipped] = useState<ParseSkip[]>([]);
+  const [inactiveRows, setInactiveRows] = useState<ParsedPlanRow[]>([]);
   const [status, setStatus] = useState<"idle" | "parsing" | "parsed" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
   const [savedCount, setSavedCount] = useState(0);
+  const [neaktivniVysledek, setNeaktivniVysledek] = useState<NeaktivniVysledek | null>(null);
 
   const missingTerminCount = rows.filter((row) => !row.termin).length;
 
@@ -70,6 +80,8 @@ function PlanUpload() {
       const result = parsePlanWorkbook(buffer);
       setRows(result.rows);
       setSkipped(result.skipped);
+      setInactiveRows(result.inactive);
+      setNeaktivniVysledek(null);
       setStatus("parsed");
     } catch (err) {
       setError(
@@ -85,6 +97,7 @@ function PlanUpload() {
     setStatus("saving");
     setError("");
     setSavedCount(0);
+    setNeaktivniVysledek(null);
     try {
       const col = collection(db, "planovane_revize");
       let saved = 0;
@@ -111,6 +124,38 @@ function PlanUpload() {
         saved += batchRows.length;
         setSavedCount(saved);
       }
+
+      // Řádky se "Stav" = "INACTIVE" appka neimportuje – naopak podle nich
+      // smaže odpovídající existující záznam (a jeho revizní zprávy, pokud
+      // u zařízení nezůstal žádný jiný aktivní typ revize), viz
+      // smazNeaktivniZarizeni. Díky stabilnímu ID podle "PÚ" se tak i jednou
+      // provedený import zpětně postará o úklid zařízení, která byla dřív
+      // aktivní a teď už nejsou.
+      let planSmazano = 0;
+      let zpravSmazano = 0;
+      let souboruSmazano = 0;
+      let bezPu = 0;
+      for (const row of inactiveRows) {
+        const puId = row.pu ? sanitizeDocId(row.pu) : "";
+        if (!puId) {
+          bezPu += 1;
+          continue;
+        }
+        const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni);
+        if (vysledek.planSmazan) planSmazano += 1;
+        zpravSmazano += vysledek.smazanoZaznamu;
+        souboruSmazano += vysledek.smazanoSouboru;
+      }
+      if (inactiveRows.length > 0) {
+        setNeaktivniVysledek({
+          zpracovano: inactiveRows.length,
+          planSmazano,
+          zpravSmazano,
+          souboruSmazano,
+          bezPu,
+        });
+      }
+
       setStatus("saved");
     } catch (err) {
       setError(describeSaveError(err));
@@ -131,7 +176,9 @@ function PlanUpload() {
           <code className="rounded bg-gray-100 px-1 py-0.5">cekajici</code>. Řádky, u kterých se
           nepodaří rozpoznat termín, se uloží taky – se stavem{" "}
           <code className="rounded bg-gray-100 px-1 py-0.5">chybi_termin</code>, ať se dají dohledat
-          a ručně doplnit.
+          a ručně doplnit. Řádky se sloupcem &bdquo;Stav&ldquo; = &bdquo;INACTIVE&ldquo; se NEnaimportují –
+          existující záznam pro dané zařízení (a jeho revizní zprávy) se naopak smaže, appka
+          neaktivní zařízení nedrží.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -142,6 +189,8 @@ function PlanUpload() {
               setFile(e.target.files?.[0] ?? null);
               setRows([]);
               setSkipped([]);
+              setInactiveRows([]);
+              setNeaktivniVysledek(null);
               setStatus("idle");
             }}
             className="text-[13px]"
@@ -175,18 +224,24 @@ function PlanUpload() {
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
               <span>
-                Nalezeno {rows.length} záznamů: {rows.length - missingTerminCount} v pořádku
+                Nalezeno {rows.length} záznamů k importu: {rows.length - missingTerminCount} v pořádku
                 {missingTerminCount > 0 &&
                   `, ${missingTerminCount} bez termínu (budou uloženy, ale je potřeba je ručně doplnit)`}
+                {inactiveRows.length > 0 &&
+                  ` — ${inactiveRows.length} neaktivních zařízení (Stav = INACTIVE) se NEimportuje, existující záznamy se smažou`}
                 {skipped.length > 0 && ` — přeskočeno ${skipped.length} prázdných řádků`}.
               </span>
               {status !== "saved" && (
                 <button
                   onClick={handleSave}
-                  disabled={rows.length === 0 || status === "saving"}
+                  disabled={(rows.length === 0 && inactiveRows.length === 0) || status === "saving"}
                   className="rounded-md bg-accent px-4 py-1.5 text-[12.5px] font-bold tracking-wide text-white transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {status === "saving" ? "Ukládám…" : `Uložit ${rows.length} záznamů`}
+                  {status === "saving"
+                    ? "Ukládám…"
+                    : inactiveRows.length > 0
+                      ? `Uložit ${rows.length} záznamů (+ smazat ${inactiveRows.length} neaktivních)`
+                      : `Uložit ${rows.length} záznamů`}
                 </button>
               )}
             </div>
@@ -195,6 +250,38 @@ function PlanUpload() {
               <p className="rounded-md bg-green-50 px-3 py-2 text-[12.5px] font-semibold text-status-ok">
                 Úspěšně uloženo {rows.length} záznamů do databáze (planovane_revize).
               </p>
+            )}
+
+            {status === "saved" && neaktivniVysledek && (
+              <p className="rounded-md bg-gray-100 px-3 py-2 text-[12.5px] text-gray-600">
+                Neaktivní zařízení: zpracováno {neaktivniVysledek.zpracovano}, smazáno{" "}
+                {neaktivniVysledek.planSmazano} záznamů z plánu, {neaktivniVysledek.zpravSmazano}{" "}
+                revizních zpráv a {neaktivniVysledek.souboruSmazano} PDF souborů ze Storage
+                {neaktivniVysledek.bezPu > 0 &&
+                  ` (${neaktivniVysledek.bezPu} nešlo automaticky spárovat – chybí PÚ)`}
+                .
+              </p>
+            )}
+
+            {inactiveRows.length > 0 && (
+              <details className="text-[12px] text-gray-500">
+                <summary className="cursor-pointer font-semibold">
+                  Neaktivní zařízení (Stav = INACTIVE) – nebudou naimportována
+                </summary>
+                <ul className="mt-1 list-inside list-disc">
+                  {inactiveRows.slice(0, 20).map((row, i) => (
+                    <li key={i}>
+                      {row.cislo_zarizeni || "(bez čísla zařízení)"} — {row.popis || "—"} (PÚ{" "}
+                      {row.pu || "chybí"})
+                    </li>
+                  ))}
+                </ul>
+                {inactiveRows.length > 20 && (
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    Zobrazeno prvních 20 z {inactiveRows.length}.
+                  </p>
+                )}
+              </details>
             )}
 
             {skipped.length > 0 && (

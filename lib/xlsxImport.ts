@@ -21,6 +21,15 @@ export type ParseSkip = {
 export type ParsePlanResult = {
   rows: ParsedPlanRow[];
   skipped: ParseSkip[];
+  /**
+   * Řádky se sloupcem "Stav" = "INACTIVE" (case-insensitive, ořízlé) –
+   * appka je při importu NEukládá/needituje. Volající (viz handleSave v
+   * app/nahrat/page.tsx) navíc podle nich smaže odpovídající existující
+   * záznam v "planovane_revize" (a jeho revizní zprávy), pokud v appce už
+   * je – "ACTIVE" a "DRAFT" (nebo cokoli jiného než "INACTIVE") se
+   * importují normálně, stejně jako doteď.
+   */
+  inactive: ParsedPlanRow[];
 };
 
 type RawTable = {
@@ -50,6 +59,17 @@ function isPuHeader(h: string): boolean {
 // Sloupec s holým číslem/kódem zařízení ("Aktivum" apod.) – ne "Původní aktivum".
 function isPlainAssetHeader(h: string): boolean {
   return /^aktivum$|^zarizeni$|assetnum|^asset$|equipment/.test(h) && !isOriginalAssetHeader(h);
+}
+
+// Sloupec "Stav" – appka podle jeho hodnoty rozlišuje aktivní zařízení
+// ("ACTIVE"/"DRAFT", importují se normálně) od neaktivních ("INACTIVE").
+function isStatusHeader(h: string): boolean {
+  return h === "stav";
+}
+
+// Case-insensitive, ořízlé porovnání – "INACTIVE"/"inactive"/" Inactive " atd.
+function isInactiveValue(raw: string): boolean {
+  return raw.trim().toLowerCase() === "inactive";
 }
 
 function isDescriptionHeader(h: string): boolean {
@@ -180,9 +200,10 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
 
   const rows: ParsedPlanRow[] = [];
   const skipped: ParseSkip[] = [];
+  const inactive: ParsedPlanRow[] = [];
 
   if (headers.length === 0 || rawRows.length === 0) {
-    return { rows, skipped };
+    return { rows, skipped, inactive };
   }
 
   const normalized = headers.map(normalizeHeader);
@@ -196,6 +217,7 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
   const dateIndex = normalized.findIndex((h) => isDateHeader(h));
   const frequencyIndex = normalized.findIndex((h) => isFrequencyHeader(h));
   const frequencyUnitIndex = normalized.findIndex((h) => isFrequencyUnitHeader(h));
+  const statusIndex = normalized.findIndex((h) => isStatusHeader(h));
 
   // V tomto exportu je "Popis" třikrát: kód zařízení (před sloupcem "Aktivum"),
   // popis aktiva (hned za "Aktivum") a popis pracovního postupu (na konci).
@@ -240,6 +262,25 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
         : null;
     const jednotky_frekvence = frequencyUnitIndex >= 0 ? cellText(row[frequencyUnitIndex]) : "";
     const pu = puIndex >= 0 ? cellText(row[puIndex]) : "";
+    const stavRaw = statusIndex >= 0 ? cellText(row[statusIndex]) : "";
+
+    const parsedRow: ParsedPlanRow = {
+      cislo_zarizeni,
+      popis,
+      termin,
+      frekvence: frekvence !== null && !isNaN(frekvence) ? frekvence : null,
+      jednotky_frekvence,
+      pu,
+    };
+
+    // "INACTIVE" zařízení appka neimportuje vůbec – ani jako nový, ani jako
+    // aktualizaci existujícího záznamu (ten navíc volající podle tohohle
+    // pole rovnou smaže, viz handleSave). "ACTIVE"/"DRAFT" (nebo chybějící
+    // sloupec "Stav") se importují normálně.
+    if (statusIndex >= 0 && isInactiveValue(stavRaw)) {
+      inactive.push(parsedRow);
+      return;
+    }
 
     // Chybějící termín (nebo jiný nerozpoznaný údaj) řádek nezahazuje – uloží se
     // s tím, co se podařilo přečíst, a označí se stavem "chybi_termin" při
@@ -252,15 +293,8 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
       return;
     }
 
-    rows.push({
-      cislo_zarizeni,
-      popis,
-      termin,
-      frekvence: frekvence !== null && !isNaN(frekvence) ? frekvence : null,
-      jednotky_frekvence,
-      pu,
-    });
+    rows.push(parsedRow);
   });
 
-  return { rows, skipped };
+  return { rows, skipped, inactive };
 }
