@@ -695,6 +695,38 @@ type PruneSouhrn = {
   smazanoSouboru: number;
 };
 
+// Diagnostická tabulka výsledků ukazuje jen posledních RESULTS_DISPLAY_LIMIT
+// zpracovaných zpráv – u dávek v řádu tisíců by appka jinak při KAŽDÉM dalším
+// zpracovaném souboru kopírovala a znovu vykreslovala pořád rostoucí pole
+// (a k tomu ho ještě celé profiltrovávala kvůli souhrnným počtům, viz
+// VysledkySouhrn níž) – to prohlížeč při stovkách/tisících položek reálně
+// dokázalo na dlouho zaseknout ("Page Unresponsive"). Souhrnné počty se proto
+// počítají průběžně (o(1) na položku), nezávisle na tom, co se zrovna
+// zobrazuje v tabulce.
+const RESULTS_DISPLAY_LIMIT = 300;
+const KE_KONTROLE_LIST_LIMIT = 50;
+
+type VysledkySouhrn = {
+  zpracovano: number;
+  uspesne: number;
+  chyba: number;
+  ok: number;
+  nok: number;
+  keKontrole: number;
+  /** Jen ukázka čísel zařízení (max KE_KONTROLE_LIST_LIMIT), ne úplný seznam. */
+  keKontroleZarizeni: string[];
+};
+
+const PRAZDNY_VYSLEDKY_SOUHRN: VysledkySouhrn = {
+  zpracovano: 0,
+  uspesne: 0,
+  chyba: 0,
+  ok: 0,
+  nok: 0,
+  keKontrole: 0,
+  keKontroleZarizeni: [],
+};
+
 /**
  * U každého čísla zařízení appka drží nejvýš HISTORIE_LIMIT (2) revizních
  * zpráv – aktuální a předchozí, viz synchronizujHistoriiZarizeni. Ta
@@ -871,7 +903,10 @@ function RevizniZpravyReprocess() {
   const prerusitRef = useRef(false);
   const [zadanoPreruseni, setZadanoPreruseni] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  // Jen posledních RESULTS_DISPLAY_LIMIT položek (viz komentář u konstanty) –
+  // pro souhrnné počty (kolik OK/NOK/chyb apod.) slouží souhrnVysledku níž.
   const [results, setResults] = useState<ReprocessResult[]>([]);
+  const [souhrnVysledku, setSouhrnVysledku] = useState<VysledkySouhrn>(PRAZDNY_VYSLEDKY_SOUHRN);
   const [error, setError] = useState("");
   const [pruneSouhrn, setPruneSouhrn] = useState<PruneSouhrn | null>(null);
   const [pruneProgress, setPruneProgress] = useState({ done: 0, total: 0 });
@@ -956,6 +991,7 @@ function RevizniZpravyReprocess() {
     setStatus("processing");
     setBezicíRezim(mod);
     setResults([]);
+    setSouhrnVysledku(PRAZDNY_VYSLEDKY_SOUHRN);
     setError("");
     setPruneSouhrn(null);
     setProgress({ done: 0, total: 0 });
@@ -988,8 +1024,29 @@ function RevizniZpravyReprocess() {
       const reportDoc = (result: ReprocessResult) => {
         done += 1;
         setProgress({ done, total: docs.length });
-        setResults((prev) => [...prev, result]);
         if (result.cislo_zarizeni) dotcenaZarizeni.add(result.cislo_zarizeni);
+
+        // Tabulka drží jen posledních RESULTS_DISPLAY_LIMIT položek (slice
+        // je i tak O(limit), ne O(celkový počet)) – u dávek v tisících jinak
+        // appka při každé další položce kopírovala/vykreslovala pořád delší
+        // pole, což dokázalo prohlížeč na dlouho zaseknout.
+        setResults((prev) => [...prev, result].slice(-RESULTS_DISPLAY_LIMIT));
+
+        // Souhrnné počty se aktualizují přírůstkově (O(1) na položku), ne
+        // filtrováním celého pole výsledků při každém překreslení.
+        setSouhrnVysledku((prev) => ({
+          zpracovano: prev.zpracovano + 1,
+          uspesne: prev.uspesne + (result.stav !== "chyba" ? 1 : 0),
+          chyba: prev.chyba + (result.stav === "chyba" ? 1 : 0),
+          ok: prev.ok + (result.vysledekRevize === "OK" ? 1 : 0),
+          nok: prev.nok + (result.vysledekRevize === "NOK" ? 1 : 0),
+          keKontrole: prev.keKontrole + (result.vysledekRevize === "KE_KONTROLE" ? 1 : 0),
+          keKontroleZarizeni:
+            result.vysledekRevize === "KE_KONTROLE" &&
+            prev.keKontroleZarizeni.length < KE_KONTROLE_LIST_LIMIT
+              ? [...prev.keKontroleZarizeni, result.cislo_zarizeni]
+              : prev.keKontroleZarizeni,
+        }));
       };
 
       const processGroup = async ([storagePath, groupDocs]: [
@@ -1184,13 +1241,6 @@ function RevizniZpravyReprocess() {
     }
   };
 
-  const uspesneCount = results.filter((r) => r.stav !== "chyba").length;
-  const chybaCount = results.filter((r) => r.stav === "chyba").length;
-  const vysledekOkCount = results.filter((r) => r.vysledekRevize === "OK").length;
-  const vysledekNokCount = results.filter((r) => r.vysledekRevize === "NOK").length;
-  const vysledekKeKontroleZarizeni = results
-    .filter((r) => r.vysledekRevize === "KE_KONTROLE")
-    .map((r) => r.cislo_zarizeni);
 
   return (
     <div className="overflow-hidden rounded-lg bg-white shadow-sm">
@@ -1329,15 +1379,16 @@ function RevizniZpravyReprocess() {
               <div className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] font-semibold text-status-warn">
                 Přerušeno – zpracováno {progress.done} z {progress.total}{" "}
                 {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
-                zpráv ({uspesneCount} úspěšně{chybaCount > 0 ? `, ${chybaCount} selhalo` : ""}).
-                Zbytek zůstal uložený jako rozdělaná dávka – pokračuj tlačítkem výš.
+                zpráv ({souhrnVysledku.uspesne} úspěšně
+                {souhrnVysledku.chyba > 0 ? `, ${souhrnVysledku.chyba} selhalo` : ""}). Zbytek
+                zůstal uložený jako rozdělaná dávka – pokračuj tlačítkem výš.
               </div>
             ) : (
               <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
-                Zpracováno {results.length}{" "}
+                Zpracováno {souhrnVysledku.zpracovano}{" "}
                 {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
-                zpráv: {uspesneCount} úspěšně aktualizováno
-                {chybaCount > 0 && `, ${chybaCount} selhalo`}.
+                zpráv: {souhrnVysledku.uspesne} úspěšně aktualizováno
+                {souhrnVysledku.chyba > 0 && `, ${souhrnVysledku.chyba} selhalo`}.
               </div>
             )}
 
@@ -1350,24 +1401,25 @@ function RevizniZpravyReprocess() {
               </div>
             )}
 
-            {uspesneCount > 0 && (
+            {souhrnVysledku.uspesne > 0 && (
               <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-[12.5px] text-gray-700">
-                Výsledek revize (z {uspesneCount} úspěšně přepočítaných): {vysledekOkCount} OK,{" "}
-                {vysledekNokCount} NOK, {vysledekKeKontroleZarizeni.length} ke kontrole (nerozpoznaná
-                formulace pole „Celkové hodnocení“).
-                {vysledekKeKontroleZarizeni.length > 0 && (
+                Výsledek revize (z {souhrnVysledku.uspesne} úspěšně přepočítaných):{" "}
+                {souhrnVysledku.ok} OK, {souhrnVysledku.nok} NOK, {souhrnVysledku.keKontrole} ke
+                kontrole (nerozpoznaná formulace pole „Celkové hodnocení“).
+                {souhrnVysledku.keKontroleZarizeni.length > 0 && (
                   <details className="mt-1">
                     <summary className="cursor-pointer font-semibold text-status-warn">
-                      Čísla zařízení ke kontrole
+                      Čísla zařízení ke kontrole (ukázka)
                     </summary>
                     <ul className="mt-1 list-inside list-disc">
-                      {vysledekKeKontroleZarizeni.slice(0, 20).map((cislo, i) => (
+                      {souhrnVysledku.keKontroleZarizeni.map((cislo, i) => (
                         <li key={i}>{cislo || "(bez čísla zařízení)"}</li>
                       ))}
                     </ul>
-                    {vysledekKeKontroleZarizeni.length > 20 && (
+                    {souhrnVysledku.keKontrole > souhrnVysledku.keKontroleZarizeni.length && (
                       <p className="mt-1 text-[11px] text-gray-400">
-                        Zobrazeno prvních 20 z {vysledekKeKontroleZarizeni.length}.
+                        Zobrazeno prvních {souhrnVysledku.keKontroleZarizeni.length} z{" "}
+                        {souhrnVysledku.keKontrole}.
                       </p>
                     )}
                   </details>
@@ -1377,6 +1429,12 @@ function RevizniZpravyReprocess() {
 
             {results.length > 0 && (
               <div className="overflow-x-auto">
+                {souhrnVysledku.zpracovano > results.length && (
+                  <p className="mb-1 text-[11px] text-gray-400">
+                    Zobrazeno posledních {results.length} z {souhrnVysledku.zpracovano}{" "}
+                    zpracovaných – souhrnné počty výš ale zahrnují úplně všechno.
+                  </p>
+                )}
                 <table className="w-full text-left text-[12.5px]">
                   <thead>
                     <tr className="border-b border-gray-200 text-gray-500">
