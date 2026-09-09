@@ -1,6 +1,13 @@
-import * as pdfjsLib from "pdfjs-dist";
-import { parseFlexibleDate } from "@/lib/parseDate";
-import { yieldToMainThread } from "@/lib/yieldToMainThread";
+// "legacy" build (ne obyčejné "pdfjs-dist") záměrně – tenhle modul se
+// nepoužívá jen z prohlížeče (viz app/nahrat/page.tsx), ale i ze samostatného
+// Node skriptu scripts/reprocess-all-revizni-zpravy.ts. Obyčejný "pdfjs-dist"
+// build v Node spadne hned při importu (spoléhá na Uint8Array.prototype.toHex,
+// které starší/aktuální Node nemusí mít) – "legacy" build je Mozillou určený
+// přesně pro tuhle univerzální kompatibilitu (starší prohlížeče i Node/server)
+// a funguje beze změny v obou prostředích.
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { parseFlexibleDate } from "./parseDate";
+import { yieldToMainThread } from "./yieldToMainThread";
 
 /**
  * Klasifikace "celkove_hodnoceni" do tří stavů – appka nikdy nemá jistě
@@ -60,13 +67,28 @@ export type ParseRevizniZpravyResult = {
 };
 
 // pdf.worker.min.mjs v /public je zkopírovaný přímo z nainstalované verze
-// pdfjs-dist (node_modules/pdfjs-dist/build/pdf.worker.min.mjs) – API a worker
-// verze musí přesně sedět, jinak pdf.js odmítne dokument otevřít. Při update
-// balíčku pdfjs-dist je potřeba worker soubor v /public zkopírovat znovu.
+// pdfjs-dist (node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs) – API a
+// worker verze musí přesně sedět, jinak pdf.js odmítne dokument otevřít. Při
+// update balíčku pdfjs-dist je potřeba worker soubor v /public zkopírovat
+// znovu (ze stejné "legacy" varianty, viz import pdfjsLib výš).
+//
+// V Node (scripts/reprocess-all-revizni-zpravy.ts) žádný /pdf.worker.min.mjs
+// server neběží – worker soubor se tam najde přímo v node_modules. "node:module"
+// se importuje dynamicky (ne staticky nahoře v souboru), ať Next.js tenhle
+// Node-only kód vůbec nemusí řešit při sestavování klientského bundlu pro
+// prohlížeč (ta větev se za běhu v prohlížeči nikdy nespustí).
 let workerConfigured = false;
-function ensureWorker() {
+async function ensureWorker() {
   if (workerConfigured) return;
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+  if (typeof window !== "undefined") {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+  } else {
+    const { createRequire } = await import("node:module");
+    const require = createRequire(import.meta.url);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve(
+      "pdfjs-dist/legacy/build/pdf.worker.min.mjs"
+    );
+  }
   workerConfigured = true;
 }
 
@@ -393,7 +415,7 @@ function detectSablona(lines: string[]): Sablona | null {
  * neodpovídající žádné z nich přeskočí se srozumitelným důvodem.
  */
 export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRevizniZpravyResult> {
-  ensureWorker();
+  await ensureWorker();
 
   // getDocument() převezme vlastnictví předaného ArrayBufferu a přesune ho
   // (detached) do web workeru – jakékoli další použití originálu (např. upload
