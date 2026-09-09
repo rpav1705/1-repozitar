@@ -706,6 +706,17 @@ type PruneSouhrn = {
 const RESULTS_DISPLAY_LIMIT = 300;
 const KE_KONTROLE_LIST_LIMIT = 50;
 
+// Zpracování se nespouští na celou frontu najednou, ale po dávkách max.
+// REPROCESS_BATCH_SIZE souborů (skupin) – u front v řádu tisíců appka jinak
+// celou dobu běhu držela v paměti kompletní seznam VŠECH zbývajících skupin
+// (Map/pole s odkazy na Firestore dokumenty pro každou z nich), navíc bez
+// jediné pauzy, kdy by prohlížeč dostal prostor na garbage collection. Mezi
+// dávkami appka uvolní referenci na tu právě dokončenou (viz groupBatches
+// níž) a na krátko počká – dál to ale z pohledu uživatele vypadá jako jedno
+// souvislé zpracování, jen interně rozporcované na menší kousky.
+const REPROCESS_BATCH_SIZE = 100;
+const REPROCESS_BATCH_PAUSE_MS = 1500;
+
 type VysledkySouhrn = {
   zpracovano: number;
   uspesne: number;
@@ -1005,8 +1016,13 @@ function RevizniZpravyReprocess() {
       // Zbývající = cílová dávka MINUS to, co už (i z dřívějšího přerušeného
       // běhu) hotové je – tím se do fronty samy započítají i mezitím
       // přibylé nové zprávy, aniž by se znovu řešilo už hotové.
-      const docs = cilova.filter((d) => !hotoveIdsRunning.has(d.id));
-      setProgress({ done: 0, total: docs.length });
+      let docs: QueryDocumentSnapshot<DocumentData>[] = cilova.filter(
+        (d) => !hotoveIdsRunning.has(d.id)
+      );
+      // Zapamatováno zvlášť (ne docs.length dole v reportDoc), ať appka
+      // nemusí kvůli jednomu číslu dál držet referenci na celé pole docs.
+      const totalDocs = docs.length;
+      setProgress({ done: 0, total: totalDocs });
 
       // Skupina podle pdf_storage_path – víc revizních zpráv (stránek) může
       // odkazovat na stejný nahraný soubor, ať se nestahuje víckrát.
@@ -1018,12 +1034,16 @@ function RevizniZpravyReprocess() {
         group.push(d);
         groups.set(path, group);
       }
+      // docs appka dál nepotřebuje (jen k sestavení groups výš) – uvolní ho
+      // z paměti, ať zbytek běhu drží zbývající zprávy jen jednou, v
+      // groupBatches níž.
+      docs = [];
 
       let done = 0;
       const dotcenaZarizeni = new Set<string>();
       const reportDoc = (result: ReprocessResult) => {
         done += 1;
-        setProgress({ done, total: docs.length });
+        setProgress({ done, total: totalDocs });
         if (result.cislo_zarizeni) dotcenaZarizeni.add(result.cislo_zarizeni);
 
         // Tabulka drží jen posledních RESULTS_DISPLAY_LIMIT položek (slice
@@ -1156,20 +1176,45 @@ function RevizniZpravyReprocess() {
       // proto jen 4 souběžná stahování + malá náhodná prodleva výš v
       // processGroup, ať appka nepálí požadavky na Storage v jedné špičce.
       const DOWNLOAD_CONCURRENCY = 4;
-      const groupEntries = Array.from(groups.entries());
-      let nextIndex = 0;
-      async function worker() {
-        while (nextIndex < groupEntries.length) {
-          // Kontrola AŽ TADY (ne uprostřed processGroup) – rozdělaný soubor,
-          // který se právě stahuje/parsuje/zapisuje, se dokončí celý, jen se
-          // nezačne další. Nejde tak vzniknout napůl zapsaný záznam.
-          if (prerusitRef.current) break;
-          const entry = groupEntries[nextIndex];
-          nextIndex += 1;
-          await processGroup(entry);
+      // Skupiny appka nezpracovává všechny najednou jedním worker poolem,
+      // ale po dávkách max. REPROCESS_BATCH_SIZE (viz komentář u konstanty) –
+      // groups appka dál nepotřebuje (rozdělena do groupBatches), ať v
+      // paměti nezůstává i po chunk() ještě jednou navíc.
+      const groupBatches = chunk(Array.from(groups.entries()), REPROCESS_BATCH_SIZE);
+      groups.clear();
+
+      for (let batchIndex = 0; batchIndex < groupBatches.length; batchIndex += 1) {
+        if (prerusitRef.current) break;
+        const batchEntries = groupBatches[batchIndex];
+        let nextIndex = 0;
+        async function worker() {
+          while (nextIndex < batchEntries.length) {
+            // Kontrola AŽ TADY (ne uprostřed processGroup) – rozdělaný soubor,
+            // který se právě stahuje/parsuje/zapisuje, se dokončí celý, jen se
+            // nezačne další. Nejde tak vzniknout napůl zapsaný záznam.
+            if (prerusitRef.current) break;
+            const entry = batchEntries[nextIndex];
+            nextIndex += 1;
+            await processGroup(entry);
+          }
+        }
+        await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, () => worker()));
+
+        // Dokončenou dávku appka z pole hned uvolní (ne až po doběhnutí
+        // úplně celého zpracování) – u front v řádu tisíců souborů tak v
+        // paměti drží jen tu dávku, která se zrovna zpracovává/čeká, ne
+        // odkazy na úplně všechno najednou.
+        groupBatches[batchIndex] = [];
+
+        const jePosledniDavka = batchIndex === groupBatches.length - 1;
+        if (!prerusitRef.current && !jePosledniDavka) {
+          // Krátká pauza mezi dávkami – dá prohlížeči prostor uvolněnou
+          // paměť z dávky výš skutečně sklidit (garbage collection), než
+          // appka spustí další. Uživatel mezi dávkami nic neklikal ani
+          // neuvidí přerušení – zpracování pokračuje samo automaticky.
+          await new Promise((resolve) => setTimeout(resolve, REPROCESS_BATCH_PAUSE_MS));
         }
       }
-      await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, () => worker()));
       const prerušeno = prerusitRef.current;
 
       // Prořezání historie (starší než poslední 2 podle data provedení pryč,
