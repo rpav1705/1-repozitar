@@ -67,8 +67,11 @@ function computeStatus(termin: Date | null, startOfToday: Date, warnUntil: Date)
 }
 
 // Filtr tabulky "Přehled zařízení" ovládaný kliknutím na statistické karty
-// (a na tlačítko "Nutno doplnit data") – "all" = žádný filtr, výchozí stav.
-type ActiveFilter = "all" | "warn" | "overdue" | "missing" | "vcas";
+// (a na tlačítka "Nutno doplnit data" / "Bez" / "S platnou revizní zprávou")
+// – "all" = žádný filtr, výchozí stav. Všechny hodnoty se vzájemně vylučují,
+// protože je drží jediný stav "filter" – "bez_zpravy" a "s_zpravou" tak
+// fungují jako přepínač stejně jako ostatní.
+type ActiveFilter = "all" | "warn" | "overdue" | "missing" | "vcas" | "bez_zpravy" | "s_zpravou";
 
 const FILTER_LABELS: Record<ActiveFilter, string> = {
   all: "Všechny záznamy",
@@ -76,6 +79,8 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   overdue: "Po termínu",
   missing: "Nutno doplnit data",
   vcas: "Splněno včas",
+  bez_zpravy: "Bez platné revizní zprávy",
+  s_zpravou: "S platnou revizní zprávou",
 };
 
 // Case-insensitive a na diakritice nezávislé porovnání pro fulltextové hledání.
@@ -226,6 +231,14 @@ function DashboardOverview() {
   const vcasEvaluated = data ? data.stats.vcasCount + data.stats.pozdeCount : 0;
   const vcasPercent = vcasEvaluated > 0 ? Math.round((vcasCount / vcasEvaluated) * 100) : 0;
 
+  // Počítáno z už načtených řádků (ne zvlášť dotazem) – pole
+  // posledniRevizniZpravaUrl na nich už je, takže netřeba další dotaz do
+  // Firestore navíc.
+  const pocetSPlatnouZpravou = data
+    ? data.rows.filter((row) => row.posledniRevizniZpravaUrl !== null).length
+    : 0;
+  const pocetBezPlatneZpravy = data ? data.rows.length - pocetSPlatnouZpravou : 0;
+
   const stats: {
     label: string;
     value: string;
@@ -296,20 +309,13 @@ function DashboardOverview() {
         })}
       </div>
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <a
           href="/nahrat"
           className="rounded-md bg-accent px-5 py-2.5 text-[13px] font-bold tracking-wide text-white transition-colors hover:bg-orange-600"
         >
           + NAHRÁT REVIZI
         </a>
-        <button
-          disabled
-          className="cursor-not-allowed rounded-md border border-gray-300 bg-white px-5 py-2.5 text-[13px] font-semibold text-navy opacity-60"
-          title="Připravujeme"
-        >
-          Správa zařízení
-        </button>
         {data && data.stats.missingTermin > 0 && (
           <button
             onClick={() => setFilter("missing")}
@@ -324,12 +330,39 @@ function DashboardOverview() {
           </button>
         )}
 
+        {data && (
+          <div className="inline-flex overflow-hidden rounded-md border border-gray-300 text-[12.5px] font-semibold">
+            <button
+              onClick={() => setFilter("bez_zpravy")}
+              title="Zobrazit jen zařízení bez spárované aktuální revizní zprávy"
+              className={`px-3 py-2 transition-colors ${
+                filter === "bez_zpravy"
+                  ? "bg-status-missing text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              Bez platné revizní zprávy ({pocetBezPlatneZpravy})
+            </button>
+            <button
+              onClick={() => setFilter("s_zpravou")}
+              title="Zobrazit jen zařízení se spárovanou aktuální revizní zprávou"
+              className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                filter === "s_zpravou"
+                  ? "bg-status-ok text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              S platnou revizní zprávou ({pocetSPlatnouZpravou})
+            </button>
+          </div>
+        )}
+
         <input
           type="text"
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           placeholder="Hledat podle čísla zařízení nebo popisu…"
-          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-[13px] outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:ml-auto sm:w-72"
+          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-[13px] outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:w-64"
         />
       </div>
 
@@ -339,6 +372,8 @@ function DashboardOverview() {
               .filter((row) => {
                 if (filter === "all") return true;
                 if (filter === "vcas") return row.posledniRevizeVcas === true;
+                if (filter === "bez_zpravy") return row.posledniRevizniZpravaUrl === null;
+                if (filter === "s_zpravou") return row.posledniRevizniZpravaUrl !== null;
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
               })
               .filter(
