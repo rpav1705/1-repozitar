@@ -7,6 +7,11 @@ import { ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
  * uložených zpráv (RevizniZpravyReprocess) – když appka bude umět
  * extrahovat další pole, stačí ho přidat sem, ať se to projeví na obou
  * místech automaticky.
+ *
+ * Pole zpětně kopírovaná do spárovaného záznamu v "planovane_revize" (ať
+ * jsou vidět přímo jako sloupce v Přehledu zařízení bez dalšího dotazu) se
+ * skládají v lib/revizniZpravyHistorie.ts – tam se totiž zároveň řeší,
+ * která revizní zpráva u daného zařízení je skutečně ta nejnovější.
  */
 export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
   return {
@@ -14,20 +19,6 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
     datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
     novy_termin: Timestamp.fromDate(zprava.novy_termin),
     celkove_hodnoceni: zprava.celkove_hodnoceni,
-    technik_jmeno: zprava.technik_jmeno,
-    technik_cislo_opravneni: zprava.technik_cislo_opravneni,
-  };
-}
-
-/**
- * Pole zpětně kopírovaná do spárovaného záznamu v "planovane_revize", ať
- * jsou vidět přímo jako sloupce v Přehledu zařízení bez dalšího dotazu.
- * Stejně jako výše – sdílené mezi nahráním a přepočítáním.
- */
-export function revizniZpravaToPlanovaneRevizeFields(zprava: ParsedRevizniZprava) {
-  return {
-    termin: Timestamp.fromDate(zprava.novy_termin),
-    datum_provedeni: Timestamp.fromDate(zprava.datum_provedeni),
     technik_jmeno: zprava.technik_jmeno,
     technik_cislo_opravneni: zprava.technik_cislo_opravneni,
   };

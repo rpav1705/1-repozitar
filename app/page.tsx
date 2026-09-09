@@ -40,6 +40,10 @@ type PlanRow = {
   technikJmeno: string | null;
   /** Evidenční číslo oprávnění technika, nebo null. */
   technikCisloOpravneni: string | null;
+  /** URL PDF PŘEDCHOZÍ (druhé nejnovější) revizní zprávy, nebo null, pokud žádná není. */
+  predchoziRevizniZpravaUrl: string | null;
+  /** Datum provedení předchozí revizní zprávy, nebo null. */
+  predchoziDatumProvedeni: Date | null;
 };
 
 type RowStatus = "overdue" | "warn" | "planned" | "missing";
@@ -161,6 +165,14 @@ function useDashboardData() {
             technikJmeno: typeof record.technik_jmeno === "string" ? record.technik_jmeno : null,
             technikCisloOpravneni:
               typeof record.technik_cislo_opravneni === "string" ? record.technik_cislo_opravneni : null,
+            predchoziRevizniZpravaUrl:
+              typeof record.predchozi_revizni_zprava_url === "string"
+                ? record.predchozi_revizni_zprava_url
+                : null,
+            predchoziDatumProvedeni:
+              record.predchozi_datum_provedeni instanceof Timestamp
+                ? record.predchozi_datum_provedeni.toDate()
+                : null,
           };
         });
 
@@ -439,6 +451,34 @@ function DashboardOverview() {
                                   <path d="M14 2v6h6" />
                                 </svg>
                                 Revizní zpráva
+                              </a>
+                            )}
+                            {row.predchoziRevizniZpravaUrl && (
+                              <a
+                                href={row.predchoziRevizniZpravaUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title={`Otevřít předchozí revizní zprávu (PDF)${
+                                  row.predchoziDatumProvedeni
+                                    ? ` – provedeno ${row.predchoziDatumProvedeni.toLocaleDateString("cs-CZ")}`
+                                    : ""
+                                }`}
+                                className="ml-1.5 inline-flex items-center gap-1 rounded-full border border-gray-300 px-2 py-0.5 align-middle text-[10px] font-semibold text-gray-500 hover:bg-gray-100"
+                              >
+                                <svg
+                                  width="11"
+                                  height="11"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                  <path d="M14 2v6h6" />
+                                </svg>
+                                Předchozí revizní zpráva
                               </a>
                             )}
                           </td>

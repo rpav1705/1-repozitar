@@ -10,7 +10,6 @@ import {
   collection,
   doc,
   DocumentData,
-  getDoc,
   getDocs,
   query,
   QueryDocumentSnapshot,
@@ -22,7 +21,8 @@ import {
 import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
-import { revizniZpravaToFirestoreFields, revizniZpravaToPlanovaneRevizeFields } from "@/lib/revizniZpravyFirestore";
+import { revizniZpravaToFirestoreFields } from "@/lib/revizniZpravyFirestore";
+import { synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { describeSaveError } from "@/lib/friendlyError";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -331,6 +331,11 @@ function RevizniZpravyUpload() {
 
     const allProcessed: ProcessedZprava[] = [];
     const allSkipped: SkippedPageEntry[] = [];
+    // Čísla zařízení dotčená touhle dávkou – po zápisu všech zpráv se u
+    // každého z nich spustí synchronizace historie (prořezání na poslední 2
+    // + dosazení skutečně nejnovější zprávy do plánu), viz komentář u
+    // synchronizujHistoriiZarizeni.
+    const dotcenaZarizeni = new Set<string>();
 
     for (const file of files) {
       try {
@@ -374,7 +379,7 @@ function RevizniZpravyUpload() {
               posledni_revize_vcas = puvodniTermin ? zprava.datum_provedeni <= puvodniTermin : null;
             }
 
-            const revizniZpravaRef = await addDoc(collection(db, "revizni_zpravy"), {
+            await addDoc(collection(db, "revizni_zpravy"), {
               ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
               soubor_nazev: file.name,
@@ -385,25 +390,7 @@ function RevizniZpravyUpload() {
               parovani_stav,
               posledni_revize_vcas,
             });
-
-            let overenyTerminVPlanu: Date | null = null;
-            if (parovani_stav === "shoda") {
-              // Zpětný odkaz na PDF a údaje z revizní zprávy (datum provedení,
-              // technik) u záznamu v plánu, ať jde vidět přímo jako sloupce
-              // v "Přehledu zařízení" na dashboardu, bez dalšího dotazu.
-              await updateDoc(matchSnap.docs[0].ref, {
-                ...revizniZpravaToPlanovaneRevizeFields(zprava),
-                stav: "cekajici",
-                posledni_revize_vcas,
-                posledni_revizni_zprava_url: pdf_url,
-                posledni_revizni_zprava_id: revizniZpravaRef.id,
-              });
-              // Přímé ověření zpětným čtením – potvrdí, že zápis opravdu
-              // došel do Firestore (ne jen že appka volání odeslala).
-              const verifySnap = await getDoc(matchSnap.docs[0].ref);
-              const verifiedTermin = verifySnap.data()?.termin;
-              overenyTerminVPlanu = verifiedTermin instanceof Timestamp ? verifiedTermin.toDate() : null;
-            }
+            dotcenaZarizeni.add(zprava.cislo_zarizeni);
 
             allProcessed.push({
               soubor: file.name,
@@ -416,7 +403,10 @@ function RevizniZpravyUpload() {
               technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               parovani_stav,
               posledni_revize_vcas,
-              overenyTerminVPlanu,
+              // Dopočítá se až po synchronizaci historie níž – tou dobou už
+              // je jasné, jestli tahle konkrétní zpráva zůstala tou
+              // nejnovější ponechanou, nebo ji předběhla jiná z dávky.
+              overenyTerminVPlanu: null,
             });
           }
         }
@@ -435,6 +425,27 @@ function RevizniZpravyUpload() {
       }
 
       setProgress((p) => ({ ...p, done: p.done + 1 }));
+    }
+
+    // Prořízne historii (starší než poslední 2 podle data provedení pryč) a
+    // dosadí do plánu skutečně nejnovější zprávu za každé dotčené zařízení –
+    // teprve teď, po zápisu VŠECH zpráv z týhle dávky, ať pořadí zpracování
+    // souborů neovlivní výsledek.
+    const overenyTerminByZarizeni = new Map<string, Date | null>();
+    for (const cislo of dotcenaZarizeni) {
+      await synchronizujHistoriiZarizeni(cislo);
+      const planSnap = await getDocs(
+        query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cislo))
+      );
+      if (planSnap.docs.length === 1) {
+        const t = planSnap.docs[0].data().termin;
+        overenyTerminByZarizeni.set(cislo, t instanceof Timestamp ? t.toDate() : null);
+      }
+    }
+    for (const p of allProcessed) {
+      if (p.parovani_stav === "shoda") {
+        p.overenyTerminVPlanu = overenyTerminByZarizeni.get(p.cislo_zarizeni) ?? null;
+      }
     }
 
     setProcessed(allProcessed);
@@ -582,6 +593,13 @@ const REPROCESS_STAV_LABELS: Record<ReprocessStav, { label: string; className: s
   chyba: { label: "Selhalo", className: "text-status-overdue" },
 };
 
+type PruneSouhrn = {
+  zarizeni: number;
+  zarizeniSMazanim: number;
+  smazanoZaznamu: number;
+  smazanoSouboru: number;
+};
+
 /**
  * Znovu stáhne a naparsuje PDF revizních zpráv, které appka už má uložené ve
  * Firebase Storage (odkaz na ně drží kolekce "revizni_zpravy"), a přepíše
@@ -589,18 +607,28 @@ const REPROCESS_STAV_LABELS: Record<ReprocessStav, { label: string; className: s
  * pokaždé, když přibude nové extrahované pole (nebo se opraví parsování).
  * Víc revizních zpráv může odkazovat na stejný nahraný soubor (víc zařízení
  * na stránku) – soubor se proto stahuje a parsuje jen jednou na skupinu.
+ *
+ * Po přepočítání polí navíc u KAŽDÉHO dotčeného čísla zařízení spustí
+ * synchronizujHistoriiZarizeni – tím se historie zkrátí na poslední 2 zprávy
+ * (starší se smažou i s PDF ve Storage) a do plánu se dosadí skutečně
+ * nejnovější zpráva. Tohle tlačítko tak zároveň slouží jako jednorázové
+ * prořezání i pro zprávy uložené předtím, než appka historii omezovat začala.
  */
 function RevizniZpravyReprocess() {
   const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [results, setResults] = useState<ReprocessResult[]>([]);
   const [error, setError] = useState("");
+  const [pruneSouhrn, setPruneSouhrn] = useState<PruneSouhrn | null>(null);
+  const [pruneProgress, setPruneProgress] = useState({ done: 0, total: 0 });
 
   const handleReprocess = async () => {
     setStatus("processing");
     setResults([]);
     setError("");
+    setPruneSouhrn(null);
     setProgress({ done: 0, total: 0 });
+    setPruneProgress({ done: 0, total: 0 });
 
     try {
       const snap = await getDocs(collection(db, "revizni_zpravy"));
@@ -619,10 +647,12 @@ function RevizniZpravyReprocess() {
       }
 
       let done = 0;
+      const dotcenaZarizeni = new Set<string>();
       const reportDoc = (result: ReprocessResult) => {
         done += 1;
         setProgress({ done, total: docs.length });
         setResults((prev) => [...prev, result]);
+        if (result.cislo_zarizeni) dotcenaZarizeni.add(result.cislo_zarizeni);
       };
 
       const processGroup = async ([storagePath, groupDocs]: [
@@ -679,32 +709,17 @@ function RevizniZpravyReprocess() {
             try {
               await updateDoc(docSnap.ref, revizniZpravaToFirestoreFields(fresh));
 
-              let poznamka = "";
-              let planAktualizovan = false;
-              const planIds: string[] = Array.isArray(data.planovane_revize_ids)
-                ? data.planovane_revize_ids
-                : [];
-
-              if (data.parovani_stav === "shoda" && planIds.length === 1) {
-                const planRef = doc(db, "planovane_revize", planIds[0]);
-                const planSnap = await getDoc(planRef);
-                if (planSnap.exists() && planSnap.data().posledni_revizni_zprava_id === docSnap.id) {
-                  await updateDoc(planRef, revizniZpravaToPlanovaneRevizeFields(fresh));
-                  planAktualizovan = true;
-                } else {
-                  poznamka = "párování v plánu mezitím převzala novější revize – plán beze změny";
-                }
-              } else if (data.parovani_stav !== "shoda") {
-                poznamka = "revizní zpráva nikdy neměla jednoznačné párování v plánu";
-              }
-
+              // Dosazení do plánu (a případné prořezání starší historie) se
+              // řeší až po přepočítání úplně všech zpráv, viz
+              // synchronizujHistoriiZarizeni níž – ne tady za každou zprávu
+              // zvlášť, ať pořadí zpracování skupin neovlivní výsledek.
               reportDoc({
                 id: docSnap.id,
                 soubor,
                 stranka,
                 cislo_zarizeni: fresh.cislo_zarizeni,
-                stav: planAktualizovan ? "aktualizovano_i_v_planu" : "aktualizovano",
-                poznamka,
+                stav: "aktualizovano",
+                poznamka: "",
               });
             } catch (err) {
               reportDoc({
@@ -735,6 +750,46 @@ function RevizniZpravyReprocess() {
       }
       await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
+      // Prořezání historie (starší než poslední 2 podle data provedení pryč,
+      // včetně PDF ve Storage) a dosazení skutečně nejnovější zprávy do
+      // plánu – za KAŽDÉ dotčené číslo zařízení, ne jen za ty, co se v tomhle
+      // běhu podařilo znovu naparsovat. Tohle je i jednorázové prořezání dat
+      // uložených předtím, než appka historii začala omezovat.
+      const zarizeniList = Array.from(dotcenaZarizeni);
+      setPruneProgress({ done: 0, total: zarizeniList.length });
+      const planSynchronizovanoByZarizeni = new Map<string, boolean>();
+      let pruneDone = 0;
+      const souhrn: PruneSouhrn = {
+        zarizeni: zarizeniList.length,
+        zarizeniSMazanim: 0,
+        smazanoZaznamu: 0,
+        smazanoSouboru: 0,
+      };
+      let nextPruneIndex = 0;
+      async function pruneWorker() {
+        while (nextPruneIndex < zarizeniList.length) {
+          const cislo = zarizeniList[nextPruneIndex];
+          nextPruneIndex += 1;
+          const vysledek = await synchronizujHistoriiZarizeni(cislo);
+          if (vysledek.smazanoZaznamu > 0) souhrn.zarizeniSMazanim += 1;
+          souhrn.smazanoZaznamu += vysledek.smazanoZaznamu;
+          souhrn.smazanoSouboru += vysledek.smazanoSouboru;
+          planSynchronizovanoByZarizeni.set(cislo, vysledek.planSynchronizovan);
+          pruneDone += 1;
+          setPruneProgress({ done: pruneDone, total: zarizeniList.length });
+        }
+      }
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => pruneWorker()));
+
+      setResults((prev) =>
+        prev.map((r) =>
+          r.stav === "aktualizovano" && planSynchronizovanoByZarizeni.get(r.cislo_zarizeni)
+            ? { ...r, stav: "aktualizovano_i_v_planu" }
+            : r
+        )
+      );
+      setPruneSouhrn(souhrn);
+
       setStatus("done");
     } catch (err) {
       setError(
@@ -759,7 +814,8 @@ function RevizniZpravyReprocess() {
           přepíše jimi extrahovaná pole – bez toho, aby bylo potřeba soubory znovu ručně vybírat
           na disku. Použij tohle tlačítko vždycky, když appka začne umět vytáhnout z revizní
           zprávy další údaj (nebo se opraví parsování existujícího), ať se dřív nahrané zprávy
-          doplní/opraví automaticky.
+          doplní/opraví automaticky. Zároveň u každého čísla zařízení zkrátí historii na poslední 2
+          revizní zprávy (podle data provedení) – starší smaže i s PDF ve Storage.
         </p>
 
         <div>
@@ -768,9 +824,11 @@ function RevizniZpravyReprocess() {
             disabled={status === "processing"}
             className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {status === "processing"
-              ? `Zpracovávám… (${progress.done}/${progress.total})`
-              : "Znovu zpracovat uložené revizní zprávy"}
+            {status === "processing" && pruneProgress.total > 0
+              ? `Prořezávám historii… (${pruneProgress.done}/${pruneProgress.total} zařízení)`
+              : status === "processing"
+                ? `Zpracovávám… (${progress.done}/${progress.total})`
+                : "Znovu zpracovat uložené revizní zprávy"}
           </button>
         </div>
 
@@ -783,6 +841,15 @@ function RevizniZpravyReprocess() {
               aktualizováno
               {chybaCount > 0 && `, ${chybaCount} selhalo`}.
             </div>
+
+            {pruneSouhrn && (
+              <div className="rounded-md border border-green-100 bg-green-50 px-3 py-2 text-[12.5px] text-status-ok">
+                Prořezání historie: zkontrolováno {pruneSouhrn.zarizeni} čísel zařízení, u{" "}
+                {pruneSouhrn.zarizeniSMazanim} z nich se mazalo. Smazáno celkem{" "}
+                {pruneSouhrn.smazanoZaznamu} starších záznamů v „revizni_zpravy“ a{" "}
+                {pruneSouhrn.smazanoSouboru} PDF souborů ve Storage.
+              </div>
+            )}
 
             {results.length > 0 && (
               <div className="overflow-x-auto">
