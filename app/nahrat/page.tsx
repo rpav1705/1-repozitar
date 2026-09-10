@@ -133,6 +133,24 @@ function PlanUpload() {
     setNeaktivniVysledek(null);
     try {
       const col = collection(db, "planovane_revize");
+
+      // Termín z .xls plánu je jen informativní/orientační, dokud k zařízení
+      // není zpracovaná revizní zpráva (PDF) – ten termín je závazný a NESMÍ
+      // ho reimport plánu přepsat zpátky. Existující záznamy proto načteme
+      // předem a podle pole "posledni_revizni_zprava_id" (dosazuje ho
+      // synchronizujPlanovanouRevizi v lib/revizniZpravyHistorie.ts) poznáme,
+      // které zařízení už mají termín z PDF – u těch se termin/stav při
+      // reimportu vůbec nezapisuje (merge: true jejich hodnotu prostě
+      // nechá beze změny). Dřív appka termin/stav zapisovala vždycky, takže
+      // každý reimport plánu klidně vrátil "chybí termín" i zařízení, které
+      // už mělo termín spárovaný z revizní zprávy.
+      const existingSnap = await getDocs(col);
+      const maTerminZRevizniZpravy = new Set(
+        existingSnap.docs
+          .filter((d) => typeof d.data().posledni_revizni_zprava_id === "string")
+          .map((d) => d.id)
+      );
+
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
         const batch = writeBatch(db);
@@ -149,21 +167,20 @@ function PlanUpload() {
           // Reimport plánu by tak u KAŽDÉHO zařízení v souboru (i beze změny)
           // smazal už zpracovaná data z dashboardu, jako by revizní zprávy
           // nikdy nebyly zpracované.
-          batch.set(
-            ref,
-            {
-              cislo_zarizeni: row.cislo_zarizeni,
-              popis: row.popis,
-              termin: row.termin ? Timestamp.fromDate(row.termin) : null,
-              frekvence: row.frekvence,
-              jednotky_frekvence: row.jednotky_frekvence,
-              pu: row.pu,
-              // Chybějící termín se neztrácí zahozením řádku, ale označením stavu –
-              // je potřeba ho ručně doplnit (viz "Nutno doplnit data" na dashboardu).
-              stav: row.termin ? "cekajici" : "chybi_termin",
-            },
-            { merge: true }
-          );
+          const data: Record<string, unknown> = {
+            cislo_zarizeni: row.cislo_zarizeni,
+            popis: row.popis,
+            frekvence: row.frekvence,
+            jednotky_frekvence: row.jednotky_frekvence,
+            pu: row.pu,
+          };
+          if (!maTerminZRevizniZpravy.has(puId)) {
+            data.termin = row.termin ? Timestamp.fromDate(row.termin) : null;
+            // Chybějící termín se neztrácí zahozením řádku, ale označením stavu –
+            // je potřeba ho ručně doplnit (viz "Nutno doplnit data" na dashboardu).
+            data.stav = row.termin ? "cekajici" : "chybi_termin";
+          }
+          batch.set(ref, data, { merge: true });
         });
         await batch.commit();
         saved += batchRows.length;
