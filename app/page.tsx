@@ -125,7 +125,17 @@ function computeStatus(termin: Date | null, startOfToday: Date, warnUntil: Date)
 // – "all" = žádný filtr, výchozí stav. Všechny hodnoty se vzájemně vylučují,
 // protože je drží jediný stav "filter" – "bez_zpravy" a "s_zpravou" tak
 // fungují jako přepínač stejně jako ostatní.
-type ActiveFilter = "all" | "warn" | "overdue" | "missing" | "vcas" | "bez_zpravy" | "s_zpravou";
+type ActiveFilter =
+  | "all"
+  | "warn"
+  | "overdue"
+  | "missing"
+  | "vcas"
+  | "bez_zpravy"
+  | "s_zpravou"
+  | "vysledek_ok"
+  | "vysledek_nok"
+  | "vysledek_ke_kontrole";
 
 const FILTER_LABELS: Record<ActiveFilter, string> = {
   all: "Všechny záznamy",
@@ -135,6 +145,9 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   vcas: "Splněno včas",
   bez_zpravy: "Bez platné revizní zprávy",
   s_zpravou: "S platnou revizní zprávou",
+  vysledek_ok: "Výsledek revize: OK",
+  vysledek_nok: "Výsledek revize: NOK",
+  vysledek_ke_kontrole: "Výsledek revize: Ke kontrole",
 };
 
 // Case-insensitive a na diakritice nezávislé porovnání pro fulltextové hledání.
@@ -300,6 +313,19 @@ function DashboardOverview() {
     : 0;
   const pocetBezPlatneZpravy = data ? data.rows.length - pocetSPlatnouZpravou : 0;
 
+  // Stejně jako u ostatních karet počítáno z už načtených řádků – vysledekRevize
+  // je null u zařízení bez PDF nebo u starších dat bez zpětného doplnění, taková
+  // se do žádné z těchto tří karet nezapočítávají (OK+NOK+KE_KONTROLE <= počet řádků).
+  const pocetVysledekOk = data
+    ? data.rows.filter((row) => row.vysledekRevize === "OK").length
+    : 0;
+  const pocetVysledekNok = data
+    ? data.rows.filter((row) => row.vysledekRevize === "NOK").length
+    : 0;
+  const pocetVysledekKeKontrole = data
+    ? data.rows.filter((row) => row.vysledekRevize === "KE_KONTROLE").length
+    : 0;
+
   const stats: {
     label: string;
     value: string;
@@ -418,6 +444,49 @@ function DashboardOverview() {
           </div>
         )}
 
+        {data && (
+          <div className="flex items-center gap-2 border-l border-gray-300 pl-3">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400">
+              Výsledek revize
+            </span>
+            <div className="inline-flex overflow-hidden rounded-md border border-gray-300 text-[12.5px] font-semibold">
+              <button
+                onClick={() => setFilter("vysledek_ok")}
+                title="Zobrazit jen zařízení s výsledkem revize OK"
+                className={`px-3 py-2 transition-colors ${
+                  filter === "vysledek_ok"
+                    ? "bg-status-ok text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                OK ({pocetVysledekOk})
+              </button>
+              <button
+                onClick={() => setFilter("vysledek_nok")}
+                title="Zobrazit jen zařízení s výsledkem revize NOK"
+                className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                  filter === "vysledek_nok"
+                    ? "bg-status-overdue text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                NOK ({pocetVysledekNok})
+              </button>
+              <button
+                onClick={() => setFilter("vysledek_ke_kontrole")}
+                title="Zobrazit jen zařízení s výsledkem revize Ke kontrole"
+                className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                  filter === "vysledek_ke_kontrole"
+                    ? "bg-status-warn text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                Ke kontrole ({pocetVysledekKeKontrole})
+              </button>
+            </div>
+          </div>
+        )}
+
         <input
           type="text"
           value={searchText}
@@ -435,6 +504,9 @@ function DashboardOverview() {
                 if (filter === "vcas") return row.posledniRevizeVcas === true;
                 if (filter === "bez_zpravy") return row.posledniRevizniZpravaUrl === null;
                 if (filter === "s_zpravou") return row.posledniRevizniZpravaUrl !== null;
+                if (filter === "vysledek_ok") return row.vysledekRevize === "OK";
+                if (filter === "vysledek_nok") return row.vysledekRevize === "NOK";
+                if (filter === "vysledek_ke_kontrole") return row.vysledekRevize === "KE_KONTROLE";
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
               })
               .filter(
