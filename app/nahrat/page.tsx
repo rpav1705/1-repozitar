@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
@@ -41,6 +41,39 @@ function chunk<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+// Grafický pruh k číselnému "hotovo/celkem" – ať je vidět, jak daleko
+// zpracování je (a jestli se to vůbec hýbe) i bez čtení čísel/na dálku.
+function ProgressBar({ done, total }: { done: number; total: number }) {
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return (
+    <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+      <div
+        className="h-full rounded-full bg-blue-600 transition-[width] duration-300 ease-out"
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+// Jednoznačný signál "appka doopravdy skončila (i s pozadím) a je bezpečné
+// pokračovat" – zůstává viditelný, dokud ho uživatel sám nezavře (nemizí
+// sám po chvíli), ať ho nepřehlédne, i když se zrovna nedíval na obrazovku.
+function DoneBanner({ onDismiss, children }: { onDismiss: () => void; children: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-md border border-status-ok bg-green-50 px-3 py-2.5 text-[13px] font-bold text-status-ok">
+      <span>✓ {children}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Zavřít"
+        className="shrink-0 rounded px-1 text-[15px] leading-none text-status-ok/70 transition-colors hover:text-status-ok"
+      >
+        ×
+      </button>
+    </div>
+  );
 }
 
 // Stejná logika jako v handleSave – použité tady jen na náhled v UI, ať jde
@@ -420,10 +453,17 @@ function pluralizeSoubor(count: number): string {
 
 function RevizniZpravyUpload() {
   const [files, setFiles] = useState<File[]>([]);
-  const [status, setStatus] = useState<"idle" | "processing" | "done">("idle");
+  const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  // Závěrečná fáze PO zpracování všech souborů (synchronizace historie/plánu
+  // za každé dotčené zařízení, viz dotcenaZarizeni níž) – bez vlastního
+  // progresu/textu by appka po doběhnutí progress.done na maximum ještě
+  // chvíli nic neříkajícího dělala na pozadí a vypadalo by to jako zaseknuté.
+  const [finalizeProgress, setFinalizeProgress] = useState({ done: 0, total: 0 });
   const [processed, setProcessed] = useState<ProcessedZprava[]>([]);
   const [skippedPages, setSkippedPages] = useState<SkippedPageEntry[]>([]);
+  const [fileSummary, setFileSummary] = useState({ total: 0, ok: 0, failed: 0 });
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   const handleProcess = async () => {
     if (files.length === 0) return;
@@ -431,9 +471,13 @@ function RevizniZpravyUpload() {
     setProcessed([]);
     setSkippedPages([]);
     setProgress({ done: 0, total: files.length });
+    setFinalizeProgress({ done: 0, total: 0 });
+    setBannerDismissed(false);
 
     const allProcessed: ProcessedZprava[] = [];
     const allSkipped: SkippedPageEntry[] = [];
+    let filesOk = 0;
+    let filesFailed = 0;
     // Čísla zařízení dotčená touhle dávkou – po zápisu všech zpráv se u
     // každého z nich spustí synchronizace historie (prořezání na poslední 2
     // + dosazení skutečně nejnovější zprávy do plánu), viz komentář u
@@ -523,10 +567,12 @@ function RevizniZpravyUpload() {
             });
           }
         }
+        filesOk += 1;
       } catch (err) {
         // Chyba tu může být z libovolné fáze (čtení PDF, upload do Storage,
         // dotaz/zápis do Firestore) – ukážeme rovnou její vlastní zprávu,
         // ne obecnou "nepodařilo se uložit" (ta by mohla být zavádějící).
+        filesFailed += 1;
         allSkipped.push({
           soubor: file.name,
           stranka: 0,
@@ -539,11 +585,20 @@ function RevizniZpravyUpload() {
 
       setProgress((p) => ({ ...p, done: p.done + 1 }));
     }
+    setFileSummary({ total: files.length, ok: filesOk, failed: filesFailed });
 
     // Prořízne historii (starší než poslední 2 podle data provedení pryč) a
     // dosadí do plánu skutečně nejnovější zprávu za každé dotčené zařízení –
     // teprve teď, po zápisu VŠECH zpráv z týhle dávky, ať pořadí zpracování
-    // souborů neovlivní výsledek.
+    // souborů neovlivní výsledek. Tahle fáze běží PO doběhnutí progress na
+    // maximum a může u velkých dávek trvat citelně dlouho – vlastní
+    // stav/progres ("finalizing"), ať uživatel vidí, že appka ještě něco
+    // dělá na pozadí, a ne že zůstalo tlačítko jen viset na "X/X".
+    if (dotcenaZarizeni.size > 0) {
+      setStatus("finalizing");
+      setFinalizeProgress({ done: 0, total: dotcenaZarizeni.size });
+    }
+    let finalizeDone = 0;
     const overenyTerminByZarizeni = new Map<string, Date | null>();
     for (const cislo of dotcenaZarizeni) {
       await synchronizujHistoriiZarizeni(cislo);
@@ -554,6 +609,8 @@ function RevizniZpravyUpload() {
         const t = planSnap.docs[0].data().termin;
         overenyTerminByZarizeni.set(cislo, t instanceof Timestamp ? t.toDate() : null);
       }
+      finalizeDone += 1;
+      setFinalizeProgress({ done: finalizeDone, total: dotcenaZarizeni.size });
     }
     for (const p of allProcessed) {
       if (p.parovani_stav === "shoda") {
@@ -601,19 +658,46 @@ function RevizniZpravyUpload() {
           />
           <button
             onClick={handleProcess}
-            disabled={files.length === 0 || status === "processing"}
+            disabled={files.length === 0 || status === "processing" || status === "finalizing"}
             className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {status === "processing"
               ? `Zpracovávám… (${progress.done}/${progress.total})`
-              : files.length > 0
-                ? `Zpracovat ${files.length} ${pluralizeSoubor(files.length)}`
-                : "Zpracovat soubory"}
+              : status === "finalizing"
+                ? `Dokončuji synchronizaci… (${finalizeProgress.done}/${finalizeProgress.total})`
+                : files.length > 0
+                  ? `Zpracovat ${files.length} ${pluralizeSoubor(files.length)}`
+                  : "Zpracovat soubory"}
           </button>
         </div>
 
+        {(status === "processing" || status === "finalizing") && (
+          <div className="flex flex-col gap-1">
+            <ProgressBar
+              done={status === "finalizing" ? finalizeProgress.done : progress.done}
+              total={status === "finalizing" ? finalizeProgress.total : progress.total}
+            />
+            <p className="text-[11px] text-gray-400">
+              {status === "finalizing"
+                ? `Dokončuji synchronizaci historie a plánu… (${finalizeProgress.done}/${finalizeProgress.total} zařízení) – appka ještě není hotová, nezavírej ani nepokračuj jinam.`
+                : `Zpracovávám soubory… (${progress.done}/${progress.total})`}
+            </p>
+          </div>
+        )}
+
         {status === "done" && (
           <>
+            {!bannerDismissed && (
+              <DoneBanner onDismiss={() => setBannerDismissed(true)}>
+                Hotovo – zpracováno {fileSummary.total} {pluralizeSoubor(fileSummary.total)} (
+                {fileSummary.ok} úspěšně
+                {fileSummary.failed > 0 && `, ${fileSummary.failed} selhalo`}), rozpoznáno{" "}
+                {processed.length} revizních zpráv
+                {skippedPages.length > 0 && `, ${skippedPages.length} stránek se nepodařilo rozpoznat`}.
+                Appka doběhla úplně se vším, je bezpečné pokračovat.
+              </DoneBanner>
+            )}
+
             <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
               Rozpoznáno {processed.length} revizních zpráv: {shodaCount} spárováno a aktualizováno
               {bezShodyCount > 0 && `, ${bezShodyCount} bez odpovídajícího záznamu v plánu`}
@@ -949,6 +1033,9 @@ function RevizniZpravyReprocess() {
   const [error, setError] = useState("");
   const [pruneSouhrn, setPruneSouhrn] = useState<PruneSouhrn | null>(null);
   const [pruneProgress, setPruneProgress] = useState({ done: 0, total: 0 });
+  // Jasný "Hotovo" banner (viz DoneBanner) po doběhnutí zůstává vidět, dokud
+  // ho uživatel sám nezavře – ne že by zmizel sám po chvíli.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   // Kolik zpráv by teď zpracovalo výchozí (jen "nové") tlačítko, a kolik by
   // jich zpracovalo úplné přezpracování všeho – null = ještě se nezjistilo
   // (počáteční načítání) nebo se zjistit nepodařilo.
@@ -1035,6 +1122,7 @@ function RevizniZpravyReprocess() {
     setPruneSouhrn(null);
     setProgress({ done: 0, total: 0 });
     setPruneProgress({ done: 0, total: 0 });
+    setBannerDismissed(false);
 
     bezicíZpracovani = { rezim: mod, zacatek: new Date() };
     try {
@@ -1446,6 +1534,20 @@ function RevizniZpravyReprocess() {
               )}
             </div>
 
+            {status === "processing" && (
+              <div className="flex w-full max-w-md flex-col gap-1">
+                <ProgressBar
+                  done={pruneProgress.total > 0 ? pruneProgress.done : progress.done}
+                  total={pruneProgress.total > 0 ? pruneProgress.total : progress.total}
+                />
+                <p className="text-[11px] text-gray-400">
+                  {pruneProgress.total > 0
+                    ? `Dokončuji synchronizaci historie a plánu… (${pruneProgress.done}/${pruneProgress.total} zařízení) – appka ještě není hotová, nezavírej kartu.`
+                    : `Zpracovávám… (${progress.done}/${progress.total})`}
+                </p>
+              </div>
+            )}
+
             {status !== "processing" &&
               (pocetChyba ? (
                 <p className="text-[11px] text-red-500">{pocetChyba}</p>
@@ -1472,12 +1574,24 @@ function RevizniZpravyReprocess() {
                 zůstal uložený jako rozdělaná dávka – pokračuj tlačítkem výš.
               </div>
             ) : (
-              <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
-                Zpracováno {souhrnVysledku.zpracovano}{" "}
-                {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
-                zpráv: {souhrnVysledku.uspesne} úspěšně aktualizováno
-                {souhrnVysledku.chyba > 0 && `, ${souhrnVysledku.chyba} selhalo`}.
-              </div>
+              <>
+                {!bannerDismissed && (
+                  <DoneBanner onDismiss={() => setBannerDismissed(true)}>
+                    Hotovo – zpracováno {souhrnVysledku.zpracovano}{" "}
+                    {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
+                    zpráv ({souhrnVysledku.uspesne} úspěšně
+                    {souhrnVysledku.chyba > 0 && `, ${souhrnVysledku.chyba} selhalo`})
+                    {pruneSouhrn && `, prořezána historie u ${pruneSouhrn.zarizeniSMazanim} zařízení`}.
+                    Appka doběhla úplně se vším, je bezpečné pokračovat.
+                  </DoneBanner>
+                )}
+                <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[12.5px] text-blue-700">
+                  Zpracováno {souhrnVysledku.zpracovano}{" "}
+                  {bezicíRezim === "vse" ? "aktuálních" : "nových/dosud nezpracovaných"} revizních
+                  zpráv: {souhrnVysledku.uspesne} úspěšně aktualizováno
+                  {souhrnVysledku.chyba > 0 && `, ${souhrnVysledku.chyba} selhalo`}.
+                </div>
+              </>
             )}
 
             {pruneSouhrn && (
