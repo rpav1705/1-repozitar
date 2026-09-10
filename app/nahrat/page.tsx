@@ -108,17 +108,29 @@ function PlanUpload() {
           // řádku tak existující záznam přepíše, místo aby vytvořil duplicitu.
           const puId = row.pu ? sanitizeDocId(row.pu) : "";
           const ref = puId ? doc(col, puId) : doc(col);
-          batch.set(ref, {
-            cislo_zarizeni: row.cislo_zarizeni,
-            popis: row.popis,
-            termin: row.termin ? Timestamp.fromDate(row.termin) : null,
-            frekvence: row.frekvence,
-            jednotky_frekvence: row.jednotky_frekvence,
-            pu: row.pu,
-            // Chybějící termín se neztrácí zahozením řádku, ale označením stavu –
-            // je potřeba ho ručně doplnit (viz "Nutno doplnit data" na dashboardu).
-            stav: row.termin ? "cekajici" : "chybi_termin",
-          });
+          // merge: true – BEZ něj by set() přepsal CELÝ dokument jen poli z
+          // plánu a smazal by tak pole, která do něj dřív dopsalo zpracování
+          // revizní zprávy (posledni_revizni_zprava_id, posledni_revize_vcas,
+          // technik_jmeno, vysledek_revize, predchozi_* atd. – viz
+          // synchronizujPlanovanouRevizi v lib/revizniZpravyHistorie.ts).
+          // Reimport plánu by tak u KAŽDÉHO zařízení v souboru (i beze změny)
+          // smazal už zpracovaná data z dashboardu, jako by revizní zprávy
+          // nikdy nebyly zpracované.
+          batch.set(
+            ref,
+            {
+              cislo_zarizeni: row.cislo_zarizeni,
+              popis: row.popis,
+              termin: row.termin ? Timestamp.fromDate(row.termin) : null,
+              frekvence: row.frekvence,
+              jednotky_frekvence: row.jednotky_frekvence,
+              pu: row.pu,
+              // Chybějící termín se neztrácí zahozením řádku, ale označením stavu –
+              // je potřeba ho ručně doplnit (viz "Nutno doplnit data" na dashboardu).
+              stav: row.termin ? "cekajici" : "chybi_termin",
+            },
+            { merge: true }
+          );
         });
         await batch.commit();
         saved += batchRows.length;
