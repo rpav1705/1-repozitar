@@ -199,8 +199,33 @@ function parseTerminHodnota(raw: string): Date | null {
 // (program ILLKO Studio, dle ČSN 33 1600 ed.2).
 // ---------------------------------------------------------------------------
 
+/**
+ * Hodnota "Inventárního čísla" je jeden sloupec reconstructLines výstupu –
+ * sloupce jsou odděleny 2+ mezerami (viz join("  ") tamtéž). Původní
+ * "(\S+)" ořízl hodnotu na PRVNÍ mezeře i uvnitř jednoho sloupce, což mělo
+ * dva různé (a navzájem opačné) reálné dopady:
+ *   - u kódu rozděleného mezerou překlepem ("ASST 133", "BLUE 01") uřízl
+ *     druhou půlku úplně – kód se pak vůbec nespároval s plánem.
+ *   - u popisného dvouslovného kódu ("čistici box") uřízl druhé slovo.
+ * Nová hodnota proto přeskočí JEDNU mezeru (ne 2+, to už je hranice dalšího
+ * sloupce), ale JEN pokud za ní hned následuje písmeno/číslice – to
+ * spolehlivě odliší pokračování stejného kódu od PŘÍPONY/odkazu na jiné
+ * zařízení začínající symbolem ("FOAM05 / Z01", "ASST96 + ASST97" – tam se
+ * záměrně zastaví hned na "FOAM05"/"ASST96", stejně jako předtím, protože
+ * "planovane_revize" vede jen tu první část jako vlastní číslo zařízení).
+ * Zachycená mezera uvnitř výsledného kódu se pak odstraní – viz komentář u
+ * .replace(/\s+/g, "") níž.
+ */
+const INVENTARNI_CISLO_SPOTREBIC_RE =
+  /Inventární\s*číslo:\s*([^\s]+(?:\s(?!\s)(?=[\p{L}\p{N}])[^\s]+)*)/u;
+
 function extractInventarniCisloSpotrebic(lines: string[]): string | null {
-  return findValueAfterLabel(lines, /Inventární\s*číslo:\s*(\S+)/);
+  const hodnota = findValueAfterLabel(lines, INVENTARNI_CISLO_SPOTREBIC_RE);
+  // Mezera zachycená uvnitř kódu zařízení (viz regex výš – nastane jen u
+  // překlepu typu "ASST 133") se u téhle šablony v "planovane_revize" nikde
+  // nevyskytuje (ověřeno ručně na reálných PDF – viz diagnostika
+  // nesparovaných zpráv) – odstraní se, ať se kód přesně shoduje s plánem.
+  return hodnota ? hodnota.replace(/\s+/g, "") : null;
 }
 
 function extractDatumProvedeniSpotrebic(lines: string[]): Date | null {
@@ -313,9 +338,23 @@ function extractSpotrebicZprava(lines: string[]) {
 // zprávě "165022 1-2026.pdf".
 // ---------------------------------------------------------------------------
 
+/**
+ * Popisek bez dvojtečky, hodnota má často prefix "EAN:" (např. "EAN: 165022").
+ * U některých souborů (poškozený font v PDF – stejný symptom jako "TT:
+ * undefined function" varování z pdf.js na těchhle souborech) tenhle prefix
+ * ztratí úvodní písmena a v textu zůstane jen "AN:" nebo "N:" – "(?:\S*:\s*)?"
+ * proto skipne jakýkoli takhle useknutý "*:"-prefix, ne jen doslovné "EAN:".
+ * Zachycení hodnoty samotné pak zrcadlí INVENTARNI_CISLO_SPOTREBIC_RE výš
+ * (sloupec končí až na 2+ mezerách/konci řádku, ne na první mezeře) – viz
+ * komentář tam.
+ */
+const INVENTARNI_CISLO_STROJ_RE =
+  /Inventární\s*číslo\s*:?\s*(?:\S*:\s*)?([^\s]+(?:\s(?!\s)(?=[\p{L}\p{N}])[^\s]+)*)/u;
+
 function extractInventarniCisloStroj(lines: string[]): string | null {
-  // Popisek bez dvojtečky, hodnota má často prefix "EAN:" (např. "EAN: 165022").
-  return findValueAfterLabel(lines, /Inventární\s*číslo\s*:?\s*(?:EAN:\s*)?(\S+)/);
+  const hodnota = findValueAfterLabel(lines, INVENTARNI_CISLO_STROJ_RE);
+  // Viz komentář u stejného .replace() v extractInventarniCisloSpotrebic výš.
+  return hodnota ? hodnota.replace(/\s+/g, "") : null;
 }
 
 /** "17. leden 2026" -> den 17, měsíc leden, rok 2026 (nesklonný název měsíce). */
