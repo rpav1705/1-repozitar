@@ -3,14 +3,17 @@
 import { useEffect, useState } from "react";
 import {
   collection,
+  DocumentData,
   getCountFromServer,
   getDocs,
   limit,
   orderBy,
   query,
+  QueryDocumentSnapshot,
   Timestamp,
   where,
 } from "firebase/firestore";
+import { RevizniZpravyImportZdroj } from "@/lib/importLog";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
@@ -130,7 +133,6 @@ type ActiveFilter =
   | "warn"
   | "overdue"
   | "missing"
-  | "vcas"
   | "bez_zpravy"
   | "s_zpravou"
   | "vysledek_ok"
@@ -142,7 +144,6 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   warn: "Blíží se termín",
   overdue: "Po termínu",
   missing: "Nutno doplnit data",
-  vcas: "Splněno včas",
   bez_zpravy: "Bez platné revizní zprávy",
   s_zpravou: "S platnou revizní zprávou",
   vysledek_ok: "Výsledek revize: OK",
@@ -171,9 +172,6 @@ type DashboardStats = {
   warn: number;
   overdue: number;
   missingTermin: number;
-  /** Kolik záznamů má poslední revizi spárovanou a splněnou včas / se zpožděním. */
-  vcasCount: number;
-  pozdeCount: number;
 };
 
 type DashboardData = {
@@ -202,7 +200,7 @@ function useDashboardData() {
         const startOfTodayTs = Timestamp.fromDate(startOfToday);
         const warnUntilTs = Timestamp.fromDate(warnUntil);
 
-        const [totalSnap, overdueSnap, warnSnap, missingSnap, vcasSnap, pozdeSnap, tableSnap] =
+        const [totalSnap, overdueSnap, warnSnap, missingSnap, tableSnap] =
           await Promise.all([
             getCountFromServer(col),
             getCountFromServer(query(col, where("termin", "<", startOfTodayTs))),
@@ -210,8 +208,6 @@ function useDashboardData() {
               query(col, where("termin", ">=", startOfTodayTs), where("termin", "<=", warnUntilTs))
             ),
             getCountFromServer(query(col, where("stav", "==", MISSING_TERMIN_STAV))),
-            getCountFromServer(query(col, where("posledni_revize_vcas", "==", true))),
-            getCountFromServer(query(col, where("posledni_revize_vcas", "==", false))),
             // Firestore řadí null před ostatními hodnotami, takže záznamy bez
             // termínu (stav "chybi_termin") vyjdou v tomto seřazení první.
             getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
@@ -261,8 +257,6 @@ function useDashboardData() {
             overdue: overdueSnap.data().count,
             warn: warnSnap.data().count,
             missingTermin: missingSnap.data().count,
-            vcasCount: vcasSnap.data().count,
-            pozdeCount: pozdeSnap.data().count,
           },
           rows,
         });
@@ -288,8 +282,242 @@ function useDashboardData() {
   return { data, error, loading };
 }
 
+const IMPORT_LOG_COLLECTION = "import_log";
+// Kolik čísel zařízení appka u rozkliknuté karty ukáže najednou – log
+// záznam jich (viz lib/importLog.ts) může mít uložené až tisíc, ale
+// vypisovat všechny by u velkých dávek zbytečně zatížilo vykreslení.
+const LOG_ITEMS_DISPLAY_LIMIT = 60;
+
+const REVIZE_ZDROJ_LABELS: Record<RevizniZpravyImportZdroj, string> = {
+  nahrani: "přímé nahrání PDF",
+  zpracovat_ulozene_nove: "Zpracovat uložené (jen nové)",
+  zpracovat_ulozene_vse: "Zpracovat znovu úplně vše",
+};
+
+type PlanImportLog = {
+  cas: Date;
+  pridanoCelkem: number;
+  aktualizovanoCelkem: number;
+  smazanoCelkem: number;
+  pridano: string[];
+  aktualizovano: string[];
+  smazano: string[];
+};
+
+type RevizniZpravyImportLog = {
+  cas: Date;
+  zdroj: RevizniZpravyImportZdroj;
+  zpracovanoCelkem: number;
+  chybaCelkem: number;
+  zarizeni: string[];
+};
+
+type ImportLogsData = {
+  plan: PlanImportLog | null;
+  revize: RevizniZpravyImportLog | null;
+  /** Poslední datum nahrání zprávy zjištěné přímo z "revizni_zpravy" – použije
+   *  se jako náhrada za chybějící log záznam u dat z doby PŘED zavedením
+   *  "import_log" (viz bod 4 zadání), ať karta místo chyby/prázdna ukáže
+   *  aspoň tohle. */
+  revizeFallbackCas: Date | null;
+};
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/** Záznam s nejnovějším polem "cas" z pole snapshotů (dotaz do "import_log"
+ *  cíleně nepoužívá orderBy – kombinace where("typ", "==", …) + orderBy by
+ *  vyžadovala vytvořit složený index ve Firestore konzoli. Kolekce s logy
+ *  roste jen o jeden záznam na import/zpracování, takže seřazení na klientovi
+ *  z celé (malé) načtené sady je bez problému.). */
+function nejnovejsiLogDoc(
+  docs: QueryDocumentSnapshot<DocumentData>[]
+): QueryDocumentSnapshot<DocumentData> | null {
+  let nejnovejsi: QueryDocumentSnapshot<DocumentData> | null = null;
+  let nejnovejsiMs = -Infinity;
+  for (const d of docs) {
+    const cas = d.data().cas;
+    const ms = cas instanceof Timestamp ? cas.toMillis() : -Infinity;
+    if (ms > nejnovejsiMs) {
+      nejnovejsi = d;
+      nejnovejsiMs = ms;
+    }
+  }
+  return nejnovejsi;
+}
+
+function useImportLogs() {
+  const [data, setData] = useState<ImportLogsData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      try {
+        const logCol = collection(db, IMPORT_LOG_COLLECTION);
+        const [planSnap, revizeSnap] = await Promise.all([
+          getDocs(query(logCol, where("typ", "==", "plan"))),
+          getDocs(query(logCol, where("typ", "==", "revizni_zpravy"))),
+        ]);
+        if (cancelled) return;
+
+        const planDoc = nejnovejsiLogDoc(planSnap.docs);
+        const plan: PlanImportLog | null = (() => {
+          if (!planDoc) return null;
+          const record = planDoc.data();
+          const cas = record.cas instanceof Timestamp ? record.cas.toDate() : null;
+          if (!cas) return null;
+          const pocty = (record.pocty ?? {}) as Record<string, unknown>;
+          const polozky = (record.polozky ?? {}) as Record<string, unknown>;
+          return {
+            cas,
+            pridanoCelkem: typeof pocty.pridano === "number" ? pocty.pridano : 0,
+            aktualizovanoCelkem: typeof pocty.aktualizovano === "number" ? pocty.aktualizovano : 0,
+            smazanoCelkem: typeof pocty.smazano === "number" ? pocty.smazano : 0,
+            pridano: toStringArray(polozky.pridano),
+            aktualizovano: toStringArray(polozky.aktualizovano),
+            smazano: toStringArray(polozky.smazano),
+          };
+        })();
+
+        const revizeDoc = nejnovejsiLogDoc(revizeSnap.docs);
+        const revize: RevizniZpravyImportLog | null = (() => {
+          if (!revizeDoc) return null;
+          const record = revizeDoc.data();
+          const cas = record.cas instanceof Timestamp ? record.cas.toDate() : null;
+          if (!cas) return null;
+          const pocty = (record.pocty ?? {}) as Record<string, unknown>;
+          const polozky = (record.polozky ?? {}) as Record<string, unknown>;
+          const zdroj: RevizniZpravyImportZdroj =
+            record.zdroj === "zpracovat_ulozene_nove" || record.zdroj === "zpracovat_ulozene_vse"
+              ? record.zdroj
+              : "nahrani";
+          return {
+            cas,
+            zdroj,
+            zpracovanoCelkem: typeof pocty.zpracovano === "number" ? pocty.zpracovano : 0,
+            chybaCelkem: typeof pocty.chyba === "number" ? pocty.chyba : 0,
+            zarizeni: toStringArray(polozky.zarizeni),
+          };
+        })();
+
+        let revizeFallbackCas: Date | null = null;
+        if (!revize) {
+          // Stará data z doby PŘED zavedením "import_log" – appka aspoň ukáže
+          // datum nahrání nejnovější uložené revizní zprávy, ať karta místo
+          // "chyba" zobrazí nejlepší dostupnou náhradu (viz bod 4 zadání).
+          const fallbackSnap = await getDocs(
+            query(collection(db, "revizni_zpravy"), orderBy("nahrano", "desc"), limit(1))
+          );
+          if (cancelled) return;
+          const nahrano = fallbackSnap.docs[0]?.data().nahrano;
+          revizeFallbackCas = nahrano instanceof Timestamp ? nahrano.toDate() : null;
+        }
+
+        setData({ plan, revize, revizeFallbackCas });
+      } catch {
+        if (!cancelled) setData({ plan: null, revize: null, revizeFallbackCas: null });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { data, loading };
+}
+
+function formatLogCas(d: Date): string {
+  return d.toLocaleString("cs-CZ", { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
+ * Informativní karta o posledním importu/zpracování – rozklikáváním (ne
+ * modálem/tooltipem, appka jinde v UI drží detail vždy inline) ukáže seznam
+ * dotčených čísel zařízení z detailGroups.
+ */
+function ImportLogCard({
+  title,
+  cas,
+  summary,
+  detailGroups,
+}: {
+  title: string;
+  cas: Date | null;
+  summary: string;
+  detailGroups: { label: string; items: string[] }[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = detailGroups.some((g) => g.items.length > 0);
+
+  return (
+    <div className="rounded-lg border-l-4 border-blue-600 bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => hasDetail && setExpanded((e) => !e)}
+        disabled={!hasDetail}
+        title={hasDetail ? "Zobrazit/skrýt seznam dotčených zařízení" : undefined}
+        className={`flex w-full items-start justify-between gap-3 px-[18px] py-4 text-left ${
+          hasDetail ? "cursor-pointer hover:bg-gray-50" : "cursor-default"
+        }`}
+      >
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">{title}</div>
+          <div className="mt-1.5 text-[17px] font-bold text-navy">
+            {cas ? formatLogCas(cas) : "Zatím žádný záznam"}
+          </div>
+          <div className="mt-0.5 text-[11px] text-gray-400">{summary}</div>
+        </div>
+        {hasDetail && (
+          <span
+            className={`mt-1 shrink-0 text-[10px] text-gray-400 transition-transform ${
+              expanded ? "rotate-180" : ""
+            }`}
+          >
+            ▼
+          </span>
+        )}
+      </button>
+
+      {expanded && hasDetail && (
+        <div className="border-t border-gray-100 px-[18px] py-3 text-[12px] text-gray-600">
+          {detailGroups
+            .filter((g) => g.items.length > 0)
+            .map((g) => (
+              <div key={g.label} className="mb-2.5 last:mb-0">
+                <div className="font-semibold text-gray-500">
+                  {g.label} ({g.items.length})
+                </div>
+                <ul className="mt-1 flex flex-wrap gap-1.5">
+                  {g.items.slice(0, LOG_ITEMS_DISPLAY_LIMIT).map((item, i) => (
+                    <li key={i} className="rounded bg-gray-100 px-1.5 py-0.5">
+                      {item || "(bez čísla)"}
+                    </li>
+                  ))}
+                </ul>
+                {g.items.length > LOG_ITEMS_DISPLAY_LIMIT && (
+                  <p className="mt-1 text-[10.5px] text-gray-400">
+                    Zobrazeno prvních {LOG_ITEMS_DISPLAY_LIMIT} z {g.items.length}.
+                  </p>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardOverview() {
   const { data, error, loading } = useDashboardData();
+  const { data: importLogs, loading: importLogsLoading } = useImportLogs();
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
   const trimmedSearch = searchText.trim();
@@ -300,10 +528,6 @@ function DashboardOverview() {
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const warnUntil = new Date(startOfToday);
   warnUntil.setDate(warnUntil.getDate() + WARN_DAYS);
-
-  const vcasCount = data?.stats.vcasCount ?? 0;
-  const vcasEvaluated = data ? data.stats.vcasCount + data.stats.pozdeCount : 0;
-  const vcasPercent = vcasEvaluated > 0 ? Math.round((vcasCount / vcasEvaluated) * 100) : 0;
 
   // Počítáno z už načtených řádků (ne zvlášť dotazem) – pole
   // posledniRevizniZpravaUrl na nich už je, takže netřeba další dotaz do
@@ -354,13 +578,6 @@ function DashboardOverview() {
       color: "border-status-overdue text-status-overdue",
       filterValue: "overdue",
     },
-    {
-      label: "Splněno včas",
-      value: vcasEvaluated > 0 ? `${vcasPercent}%` : "—",
-      note: vcasEvaluated > 0 ? `${vcasCount}/${vcasEvaluated} revizí` : "zatím žádná data",
-      color: "border-status-ok text-status-ok",
-      filterValue: vcasEvaluated > 0 ? "vcas" : null,
-    },
   ];
 
   return (
@@ -369,7 +586,7 @@ function DashboardOverview() {
         <p className="rounded-md bg-red-50 px-3 py-2 text-[12.5px] text-red-600">{error}</p>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => {
           const clickable = s.filterValue !== null;
           const isActive = clickable && s.filterValue === filter;
@@ -394,6 +611,41 @@ function DashboardOverview() {
             </button>
           );
         })}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <ImportLogCard
+          title="Poslední import plánu (.xls)"
+          cas={importLogs?.plan?.cas ?? null}
+          summary={
+            importLogsLoading
+              ? "Načítám…"
+              : importLogs?.plan
+                ? `${importLogs.plan.pridanoCelkem} nových, ${importLogs.plan.aktualizovanoCelkem} aktualizovaných, ${importLogs.plan.smazanoCelkem} smazaných (INACTIVE)`
+                : "Zatím žádný záznam importu"
+          }
+          detailGroups={[
+            { label: "Nově přidáno", items: importLogs?.plan?.pridano ?? [] },
+            { label: "Aktualizováno", items: importLogs?.plan?.aktualizovano ?? [] },
+            { label: "Smazáno (INACTIVE)", items: importLogs?.plan?.smazano ?? [] },
+          ]}
+        />
+        <ImportLogCard
+          title="Poslední zpracování revizních zpráv (PDF)"
+          cas={importLogs?.revize?.cas ?? importLogs?.revizeFallbackCas ?? null}
+          summary={
+            importLogsLoading
+              ? "Načítám…"
+              : importLogs?.revize
+                ? `${importLogs.revize.zpracovanoCelkem} zpracováno${
+                    importLogs.revize.chybaCelkem > 0 ? `, ${importLogs.revize.chybaCelkem} selhalo` : ""
+                  } (${REVIZE_ZDROJ_LABELS[importLogs.revize.zdroj]})`
+                : importLogs?.revizeFallbackCas
+                  ? "Zatím žádný záznam zpracování – datum poslední nahrané zprávy"
+                  : "Zatím žádný záznam"
+          }
+          detailGroups={[{ label: "Dotčená čísla zařízení", items: importLogs?.revize?.zarizeni ?? [] }]}
+        />
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -501,7 +753,6 @@ function DashboardOverview() {
           ? data.rows
               .filter((row) => {
                 if (filter === "all") return true;
-                if (filter === "vcas") return row.posledniRevizeVcas === true;
                 if (filter === "bez_zpravy") return row.posledniRevizniZpravaUrl === null;
                 if (filter === "s_zpravou") return row.posledniRevizniZpravaUrl !== null;
                 if (filter === "vysledek_ok") return row.vysledekRevize === "OK";

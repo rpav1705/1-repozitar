@@ -28,6 +28,7 @@ import {
   sanitizeDocId,
 } from "@/lib/revizniZpravyFirestore";
 import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
+import { zapisPlanImportLog, zapisRevizniZpravyImportLog } from "@/lib/importLog";
 import { describeSaveError } from "@/lib/friendlyError";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
 
@@ -150,6 +151,12 @@ function PlanUpload() {
           .filter((d) => typeof d.data().posledni_revizni_zprava_id === "string")
           .map((d) => d.id)
       );
+      // Pro rozlišení "přidáno" vs. "aktualizováno" v log záznamu (viz
+      // lib/importLog.ts) – zjištěno předem, ať klasifikace nezávisí na
+      // pořadí zpracování řádků uvnitř jedné dávky.
+      const existingIds = new Set(existingSnap.docs.map((d) => d.id));
+      const pridanoList: string[] = [];
+      const aktualizovanoList: string[] = [];
 
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
@@ -159,6 +166,11 @@ function PlanUpload() {
           // řádku tak existující záznam přepíše, místo aby vytvořil duplicitu.
           const puId = row.pu ? sanitizeDocId(row.pu) : "";
           const ref = puId ? doc(col, puId) : doc(col);
+          if (puId && existingIds.has(puId)) {
+            aktualizovanoList.push(row.cislo_zarizeni);
+          } else {
+            pridanoList.push(row.cislo_zarizeni);
+          }
           // merge: true – BEZ něj by set() přepsal CELÝ dokument jen poli z
           // plánu a smazal by tak pole, která do něj dřív dopsalo zpracování
           // revizní zprávy (posledni_revizni_zprava_id, posledni_revize_vcas,
@@ -197,6 +209,7 @@ function PlanUpload() {
       let zpravSmazano = 0;
       let souboruSmazano = 0;
       let bezPu = 0;
+      const smazanoList: string[] = [];
       for (const row of inactiveRows) {
         const puId = row.pu ? sanitizeDocId(row.pu) : "";
         if (!puId) {
@@ -204,7 +217,10 @@ function PlanUpload() {
           continue;
         }
         const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni);
-        if (vysledek.planSmazan) planSmazano += 1;
+        if (vysledek.planSmazan) {
+          planSmazano += 1;
+          smazanoList.push(row.cislo_zarizeni);
+        }
         zpravSmazano += vysledek.smazanoZaznamu;
         souboruSmazano += vysledek.smazanoSouboru;
       }
@@ -216,6 +232,17 @@ function PlanUpload() {
           souboruSmazano,
           bezPu,
         });
+      }
+
+      try {
+        await zapisPlanImportLog({
+          pridano: pridanoList,
+          aktualizovano: aktualizovanoList,
+          smazano: smazanoList,
+        });
+      } catch {
+        // Log je jen doplňkový přehled na dashboardu – selhání zápisu
+        // neblokuje samotný (už úspěšně dokončený) import.
       }
 
       setStatus("saved");
@@ -632,6 +659,20 @@ function RevizniZpravyUpload() {
     for (const p of allProcessed) {
       if (p.parovani_stav === "shoda") {
         p.overenyTerminVPlanu = overenyTerminByZarizeni.get(p.cislo_zarizeni) ?? null;
+      }
+    }
+
+    if (allProcessed.length > 0 || allSkipped.length > 0) {
+      try {
+        await zapisRevizniZpravyImportLog({
+          zdroj: "nahrani",
+          zpracovano: allProcessed.length,
+          chyba: allSkipped.length,
+          zarizeni: Array.from(dotcenaZarizeni),
+        });
+      } catch {
+        // Log je jen doplňkový přehled na dashboardu – selhání zápisu
+        // neblokuje samotné (už úspěšně dokončené) zpracování.
       }
     }
 
@@ -1173,10 +1214,14 @@ function RevizniZpravyReprocess() {
       docs = [];
 
       let done = 0;
+      let uspesneCount = 0;
+      let chybaCount = 0;
       const dotcenaZarizeni = new Set<string>();
       const reportDoc = (result: ReprocessResult) => {
         done += 1;
         setProgress({ done, total: totalDocs });
+        if (result.stav === "chyba") chybaCount += 1;
+        else uspesneCount += 1;
         if (result.cislo_zarizeni) dotcenaZarizeni.add(result.cislo_zarizeni);
 
         // Tabulka drží jen posledních RESULTS_DISPLAY_LIMIT položek (slice
@@ -1407,6 +1452,20 @@ function RevizniZpravyReprocess() {
         )
       );
       setPruneSouhrn(souhrn);
+
+      if (done > 0) {
+        try {
+          await zapisRevizniZpravyImportLog({
+            zdroj: mod === "vse" ? "zpracovat_ulozene_vse" : "zpracovat_ulozene_nove",
+            zpracovano: uspesneCount,
+            chyba: chybaCount,
+            zarizeni: Array.from(dotcenaZarizeni),
+          });
+        } catch {
+          // Log je jen doplňkový přehled na dashboardu – selhání zápisu
+          // neblokuje samotné (už úspěšně dokončené/přerušené) zpracování.
+        }
+      }
 
       if (prerušeno) {
         // Checkpoint se NEMAŽE – zůstává, aby příští kliknutí na tlačítko
