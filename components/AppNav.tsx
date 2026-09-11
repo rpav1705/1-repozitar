@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { href: "/", label: "Přehled revizí" },
   { href: "/nahrat", label: "Nahrát dokumenty" },
+  { href: "/administrace", label: "Administrace" },
 ];
 
 export function AppNav() {
@@ -29,9 +30,6 @@ export function AppNav() {
           </Link>
         );
       })}
-      <div className="cursor-default px-4 py-3 text-[13px] font-semibold text-gray-400">
-        Administrace
-      </div>
     </nav>
   );
 }
