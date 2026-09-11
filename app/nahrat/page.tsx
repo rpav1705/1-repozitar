@@ -29,8 +29,18 @@ import {
 } from "@/lib/revizniZpravyFirestore";
 import { smazNeaktivniZarizeni, synchronizujHistoriiZarizeni } from "@/lib/revizniZpravyHistorie";
 import { zapisPlanImportLog, zapisRevizniZpravyImportLog } from "@/lib/importLog";
+import {
+  popisZamekOdmitnuti,
+  uvolniZamek,
+  useZamekStav,
+  zahajHeartbeat,
+  ziskejZamek,
+  ZPRACOVANI_TYP_LABELS,
+  jeZamekAktivni,
+} from "@/lib/zpracovaniZamek";
 import { describeSaveError } from "@/lib/friendlyError";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
+import { useAuth } from "@/lib/useAuth";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
@@ -132,7 +142,28 @@ type NeaktivniVysledek = {
   bezPu: number;
 };
 
+/**
+ * Banner nad všemi třemi sekcemi téhle stránky – ukáže, jestli právě (i
+ * v JINÉ kartě/prohlížeči/u jiného uživatele) běží import plánu nebo
+ * zpracování revizních zpráv, ať appka nedovolí spustit další (viz
+ * lib/zpracovaniZamek.ts – souběh mezi importem plánu a zpracováním
+ * revizních zpráv by mohl přepsat rozpracovaná data toho druhého).
+ */
+function ZamekBanner() {
+  const stav = useZamekStav();
+  if (!jeZamekAktivni(stav)) return null;
+  const typLabel = stav.typ ? ZPRACOVANI_TYP_LABELS[stav.typ] : "jiné zpracování";
+  return (
+    <div className="rounded-md border border-status-warn bg-orange-50 px-3 py-2 text-[12.5px] font-semibold text-status-warn">
+      Právě běží: {typLabel} (spustil/a {stav.uzivatelEmail || "neznámý uživatel"}
+      {stav.zacatek && `, od ${stav.zacatek.toLocaleTimeString("cs-CZ")}`}). Dokud to nedoběhne,
+      appka nedovolí spustit import plánu ani zpracování revizních zpráv (ať si navzájem nepřepíšou data).
+    </div>
+  );
+}
+
 function PlanUpload() {
+  const { user } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedPlanRow[]>([]);
   const [skipped, setSkipped] = useState<ParseSkip[]>([]);
@@ -167,8 +198,33 @@ function PlanUpload() {
   };
 
   const handleSave = async () => {
-    setStatus("saving");
     setError("");
+
+    // Sdílený zámek (viz lib/zpracovaniZamek.ts) – import plánu i zpracování
+    // revizních zpráv zapisují do "planovane_revize", takže souběh mezi nimi
+    // (i mezi dvěma uživateli) by mohl přepsat rozpracovaný zápis toho
+    // druhého. Zámek se získává PŘED přepnutím na "saving", ať appka při
+    // odmítnutí neukáže zavádějící "ukládám" stav.
+    let zamek: Awaited<ReturnType<typeof ziskejZamek>>;
+    try {
+      zamek = await ziskejZamek("plan", user?.email ?? "neznámý uživatel");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Nepodařilo se ověřit, jestli právě neběží jiný import/zpracování. Zkus to prosím znovu."
+      );
+      setStatus("error");
+      return;
+    }
+    if (!zamek.ok) {
+      setError(popisZamekOdmitnuti(zamek.info));
+      setStatus("error");
+      return;
+    }
+    const heartbeatId = zahajHeartbeat();
+
+    setStatus("saving");
     setSavedCount(0);
     setNeaktivniVysledek(null);
     try {
@@ -288,6 +344,9 @@ function PlanUpload() {
     } catch (err) {
       setError(describeSaveError(err));
       setStatus("error");
+    } finally {
+      clearInterval(heartbeatId);
+      await uvolniZamek();
     }
   };
 
@@ -535,6 +594,7 @@ function pluralizeSoubor(count: number): string {
 }
 
 function RevizniZpravyUpload() {
+  const { user } = useAuth();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -547,9 +607,32 @@ function RevizniZpravyUpload() {
   const [skippedPages, setSkippedPages] = useState<SkippedPageEntry[]>([]);
   const [fileSummary, setFileSummary] = useState({ total: 0, ok: 0, failed: 0 });
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [zamekError, setZamekError] = useState("");
 
   const handleProcess = async () => {
     if (files.length === 0) return;
+    setZamekError("");
+
+    // Sdílený zámek (viz lib/zpracovaniZamek.ts) – souběžné zpracování
+    // revizních zpráv (i s importem plánu) by mohlo přepsat rozpracovaný
+    // zápis toho druhého (obojí sahá na "planovane_revize").
+    let zamek: Awaited<ReturnType<typeof ziskejZamek>>;
+    try {
+      zamek = await ziskejZamek("revizni_zpravy_nahrani", user?.email ?? "neznámý uživatel");
+    } catch (err) {
+      setZamekError(
+        err instanceof Error
+          ? err.message
+          : "Nepodařilo se ověřit, jestli právě neběží jiný import/zpracování. Zkus to prosím znovu."
+      );
+      return;
+    }
+    if (!zamek.ok) {
+      setZamekError(popisZamekOdmitnuti(zamek.info));
+      return;
+    }
+    const heartbeatId = zahajHeartbeat();
+
     setStatus("processing");
     setProcessed([]);
     setSkippedPages([]);
@@ -567,6 +650,7 @@ function RevizniZpravyUpload() {
     // synchronizujHistoriiZarizeni.
     const dotcenaZarizeni = new Set<string>();
 
+    try {
     for (const file of files) {
       try {
         const buffer = await file.arrayBuffer();
@@ -718,6 +802,10 @@ function RevizniZpravyUpload() {
     setProcessed(allProcessed);
     setSkippedPages(allSkipped);
     setStatus(allProcessed.length === 0 && allSkipped.length === 0 ? "idle" : "done");
+    } finally {
+      clearInterval(heartbeatId);
+      await uvolniZamek();
+    }
   };
 
   const shodaCount = processed.filter((p) => p.parovani_stav === "shoda").length;
@@ -769,6 +857,10 @@ function RevizniZpravyUpload() {
                   : "Zpracovat soubory"}
           </button>
         </div>
+
+        {zamekError && (
+          <p className="rounded-md bg-red-50 px-3 py-2 text-[12.5px] text-red-600">{zamekError}</p>
+        )}
 
         {(status === "processing" || status === "finalizing") && (
           <div className="flex flex-col gap-1">
@@ -1113,6 +1205,7 @@ function smazatReprocessCheckpoint() {
  * appka nabídne pokračovat jen se zbývajícími, místo aby začínala od nuly.
  */
 function RevizniZpravyReprocess() {
+  const { user } = useAuth();
   const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
   // jen pro popisky v UI (progress text, souhrn), na volbu dávky uvnitř
@@ -1202,6 +1295,30 @@ function RevizniZpravyReprocess() {
       );
       return;
     }
+
+    // Sdílený zámek (viz lib/zpracovaniZamek.ts) – na rozdíl od bezicíZpracovani
+    // výš (chrání jen tuhle jednu kartu prohlížeče) tenhle zabrání souběhu
+    // napříč kartami/prohlížeči/uživateli, protože zpracování zapisuje i do
+    // "planovane_revize" (přes synchronizujHistoriiZarizeni).
+    let zamek: Awaited<ReturnType<typeof ziskejZamek>>;
+    try {
+      zamek = await ziskejZamek(
+        mod === "vse" ? "revizni_zpravy_vse" : "revizni_zpravy_nove",
+        user?.email ?? "neznámý uživatel"
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Nepodařilo se ověřit, jestli právě neběží jiný import/zpracování. Zkus to prosím znovu."
+      );
+      return;
+    }
+    if (!zamek.ok) {
+      setError(popisZamekOdmitnuti(zamek.info));
+      return;
+    }
+    const heartbeatId = zahajHeartbeat();
 
     const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint() : null;
     // Pokračování dává smysl jen se stejným režimem, jaký checkpoint měl -
@@ -1531,6 +1648,8 @@ function RevizniZpravyReprocess() {
       await nacistPocty();
     } finally {
       bezicíZpracovani = null;
+      clearInterval(heartbeatId);
+      await uvolniZamek();
     }
   };
 
@@ -1805,6 +1924,7 @@ export default function NahratPage() {
           <AppNav />
 
           <div className="flex flex-col gap-4 px-7 py-6">
+            <ZamekBanner />
             <PlanUpload />
             <RevizniZpravyUpload />
             <RevizniZpravyReprocess />
