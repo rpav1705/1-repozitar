@@ -36,6 +36,45 @@ import { yieldToMainThread } from "@/lib/yieldToMainThread";
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
 const BATCH_SIZE = 500;
 
+/**
+ * Vlastní tlačítko pro výběr souboru MÍSTO nativního vzhledu prohlížeče
+ * ("Choose File(s) / No file(s) chosen") – ten appka nemohla přes CSS
+ * dostatečně přizpůsobit (text tlačítka "file:" pseudo-třída Tailwindu
+ * nezmění, jen jeho vzhled), takže by zůstal anglicky a bez info o
+ * očekávaném typu souboru. Skutečný <input type="file"> je vizuálně skrytý
+ * (`className="hidden"`), ale kliknutí na obalující <label> ho i tak otevře
+ * (standardní chování prohlížeče u vnořeného input).
+ */
+function FilePickerButton({
+  label,
+  accept,
+  multiple,
+  onChange,
+  selectedText,
+}: {
+  label: string;
+  accept: string;
+  multiple?: boolean;
+  onChange: (files: FileList | null) => void;
+  selectedText: string;
+}) {
+  return (
+    <>
+      <label className="cursor-pointer rounded-md bg-navy px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-navy-dark">
+        {label}
+        <input
+          type="file"
+          accept={accept}
+          multiple={multiple}
+          onChange={(e) => onChange(e.target.files)}
+          className="hidden"
+        />
+      </label>
+      <span className="text-[13px] text-gray-500">{selectedText}</span>
+    </>
+  );
+}
+
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -271,18 +310,18 @@ function PlanUpload() {
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="file"
+          <FilePickerButton
+            label="Vybrat soubor (.xls Maximo)"
             accept=".xls,.xlsx"
-            onChange={(e) => {
-              setFile(e.target.files?.[0] ?? null);
+            onChange={(fileList) => {
+              setFile(fileList?.[0] ?? null);
               setRows([]);
               setSkipped([]);
               setInactiveRows([]);
               setNeaktivniVysledek(null);
               setStatus("idle");
             }}
-            className="text-[13px]"
+            selectedText={file ? file.name : "Žádný soubor nevybrán"}
           />
           <button
             onClick={handleParse}
@@ -702,17 +741,19 @@ function RevizniZpravyUpload() {
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="file"
+          <FilePickerButton
+            label="Vybrat soubory (.pdf zprávy)"
             accept="application/pdf"
             multiple
-            onChange={(e) => {
-              setFiles(Array.from(e.target.files ?? []));
+            onChange={(fileList) => {
+              setFiles(Array.from(fileList ?? []));
               setProcessed([]);
               setSkippedPages([]);
               setStatus("idle");
             }}
-            className="text-[13px]"
+            selectedText={
+              files.length > 0 ? `${files.length} ${pluralizeSoubor(files.length)} vybráno` : "Žádné soubory nevybrány"
+            }
           />
           <button
             onClick={handleProcess}
