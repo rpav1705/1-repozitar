@@ -746,10 +746,17 @@ function NesparovaneZpravySection() {
         }
       }
       if (!res.ok) {
+        // I když je tělo validní JSON (nebo prázdné), uživateli ukážeme jen
+        // obecnou hlášku s HTTP stavem – skutečné tělo odpovědi ale vždy
+        // zalogujeme, ať se dá dohledat, i když nemá čekaný tvar {error}.
+        console.error("Analýza nespárovaných zpráv: server vrátil chybu.", {
+          status: res.status,
+          telo: text,
+        });
         throw new Error(
           json && typeof json.error === "string"
             ? json.error
-            : `Analýzu se nepodařilo spustit (HTTP ${res.status}).`
+            : `Analýzu se nepodařilo spustit (HTTP ${res.status}) – podrobnosti jsou v konzoli prohlížeče.`
         );
       }
       if (!json) {
