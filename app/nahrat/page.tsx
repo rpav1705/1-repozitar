@@ -142,6 +142,16 @@ type NeaktivniVysledek = {
   bezPu: number;
 };
 
+// Výsledek úklidu záznamů, jejichž PÚ v novém souboru vůbec není přítomný
+// (na rozdíl od NeaktivniVysledek u nich nedává smysl "bezPu" – jde vždycky
+// o existující záznamy, které PÚ v databázi už mají).
+type ZmizeleVysledek = {
+  zpracovano: number;
+  planSmazano: number;
+  zpravSmazano: number;
+  souboruSmazano: number;
+};
+
 /**
  * Banner nad všemi třemi sekcemi téhle stránky – ukáže, jestli právě (i
  * v JINÉ kartě/prohlížeči/u jiného uživatele) běží import plánu nebo
@@ -172,6 +182,7 @@ function PlanUpload() {
   const [error, setError] = useState("");
   const [savedCount, setSavedCount] = useState(0);
   const [neaktivniVysledek, setNeaktivniVysledek] = useState<NeaktivniVysledek | null>(null);
+  const [zmizeleVysledek, setZmizeleVysledek] = useState<ZmizeleVysledek | null>(null);
 
   const missingTerminCount = rows.filter((row) => !row.termin).length;
 
@@ -186,6 +197,7 @@ function PlanUpload() {
       setSkipped(result.skipped);
       setInactiveRows(result.inactive);
       setNeaktivniVysledek(null);
+      setZmizeleVysledek(null);
       setStatus("parsed");
     } catch (err) {
       setError(
@@ -227,6 +239,7 @@ function PlanUpload() {
     setStatus("saving");
     setSavedCount(0);
     setNeaktivniVysledek(null);
+    setZmizeleVysledek(null);
     try {
       const col = collection(db, "planovane_revize");
 
@@ -252,6 +265,20 @@ function PlanUpload() {
       const existingIds = new Set(existingSnap.docs.map((d) => d.id));
       const pridanoList: string[] = [];
       const aktualizovanoList: string[] = [];
+      const smazanoList: string[] = [];
+
+      // Množina VŠECH PÚ přítomných v novém souboru (aktivní i INACTIVE řádky
+      // – ty jsou v souboru pořád přítomné, jen se neimportují) – použije se
+      // níž k odhalení PÚ, které v novém souboru už vůbec nejsou (zdrojový
+      // systém daný řádek/PÚ smazal/sloučil), viz úklid "zmizelých" záznamů
+      // za oběma dávkami zápisu/mazání.
+      const noveIdsVSouboru = new Set<string>();
+      for (const row of rows) {
+        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
+      }
+      for (const row of inactiveRows) {
+        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
+      }
 
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
@@ -304,7 +331,6 @@ function PlanUpload() {
       let zpravSmazano = 0;
       let souboruSmazano = 0;
       let bezPu = 0;
-      const smazanoList: string[] = [];
       for (const row of inactiveRows) {
         const puId = row.pu ? sanitizeDocId(row.pu) : "";
         if (!puId) {
@@ -329,11 +355,57 @@ function PlanUpload() {
         });
       }
 
+      // Existující záznamy, jejichž PÚ v NOVÉM souboru vůbec není přítomný
+      // (ani jako aktivní, ani jako INACTIVE) – zdrojový systém daný
+      // řádek/PÚ smazal/sloučil přímo u sebe, aniž by ho označil jako
+      // INACTIVE. Appka je smaže úplně stejně jako řádky se Stavem
+      // INACTIVE (smazNeaktivniZarizeni níž se navíc postará i o revizní
+      // zprávy – ty jsou spárované podle čísla zařízení, ne podle
+      // konkrétního PÚ, takže se samy "převáží" na zbývající řádek stejného
+      // zařízení a smažou se jen tehdy, když už u čísla zařízení nezůstal
+      // v plánu žádný jiný záznam). Týká se jen záznamů vzniklých z
+      // PÚ-klíčovaného importu (mají vyplněné pole "pu") – záznamy bez PÚ
+      // (vzniklé kdysi s náhodným ID, appka je needituje) takhle spárovat
+      // nejde, necháme je beze změny. Obecná logika, netýká se jen
+      // "skupiny C" – čistí se tak i budoucí podobné případy u libovolného
+      // zařízení.
+      let zmizeleZpracovano = 0;
+      let zmizelePlanSmazano = 0;
+      let zmizeleZpravSmazano = 0;
+      let zmizeleSouboruSmazano = 0;
+      const smazanoZmizeleList: string[] = [];
+      for (const existingDoc of existingSnap.docs) {
+        const existingData = existingDoc.data();
+        const existingPu = typeof existingData.pu === "string" ? existingData.pu : "";
+        if (!existingPu) continue;
+        if (noveIdsVSouboru.has(existingDoc.id)) continue;
+
+        zmizeleZpracovano += 1;
+        const existingCisloZarizeni =
+          typeof existingData.cislo_zarizeni === "string" ? existingData.cislo_zarizeni : "";
+        const vysledek = await smazNeaktivniZarizeni(existingDoc.id, existingCisloZarizeni);
+        if (vysledek.planSmazan) {
+          zmizelePlanSmazano += 1;
+          smazanoZmizeleList.push(existingCisloZarizeni);
+        }
+        zmizeleZpravSmazano += vysledek.smazanoZaznamu;
+        zmizeleSouboruSmazano += vysledek.smazanoSouboru;
+      }
+      if (zmizeleZpracovano > 0) {
+        setZmizeleVysledek({
+          zpracovano: zmizeleZpracovano,
+          planSmazano: zmizelePlanSmazano,
+          zpravSmazano: zmizeleZpravSmazano,
+          souboruSmazano: zmizeleSouboruSmazano,
+        });
+      }
+
       try {
         await zapisPlanImportLog({
           pridano: pridanoList,
           aktualizovano: aktualizovanoList,
           smazano: smazanoList,
+          smazano_zmizele: smazanoZmizeleList,
         });
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
@@ -365,7 +437,9 @@ function PlanUpload() {
           <code className="rounded bg-gray-100 px-1 py-0.5">chybi_termin</code>, ať se dají dohledat
           a ručně doplnit. Řádky se sloupcem &bdquo;Stav&ldquo; = &bdquo;INACTIVE&ldquo; se NEnaimportují –
           existující záznam pro dané zařízení (a jeho revizní zprávy) se naopak smaže, appka
-          neaktivní zařízení nedrží.
+          neaktivní zařízení nedrží. Appka navíc při každém importu smaže i existující záznamy,
+          jejichž PÚ v novém souboru vůbec není přítomný (zdroj daný řádek/PÚ smazal nebo sloučil,
+          i když ho neoznačil jako INACTIVE) – ostatních, nezměněných záznamů se import nedotýká.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -378,6 +452,7 @@ function PlanUpload() {
               setSkipped([]);
               setInactiveRows([]);
               setNeaktivniVysledek(null);
+              setZmizeleVysledek(null);
               setStatus("idle");
             }}
             selectedText={file ? file.name : "Žádný soubor nevybrán"}
@@ -447,6 +522,15 @@ function PlanUpload() {
                 {neaktivniVysledek.bezPu > 0 &&
                   ` (${neaktivniVysledek.bezPu} nešlo automaticky spárovat – chybí PÚ)`}
                 .
+              </p>
+            )}
+
+            {status === "saved" && zmizeleVysledek && (
+              <p className="rounded-md bg-gray-100 px-3 py-2 text-[12.5px] text-gray-600">
+                Zmizelé řádky (PÚ v novém souboru už vůbec není, i když nebyl označen INACTIVE):
+                nalezeno {zmizeleVysledek.zpracovano}, smazáno {zmizeleVysledek.planSmazano} záznamů z
+                plánu, {zmizeleVysledek.zpravSmazano} revizních zpráv a {zmizeleVysledek.souboruSmazano}{" "}
+                PDF souborů ze Storage.
               </p>
             )}
 

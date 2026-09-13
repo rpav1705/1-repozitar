@@ -30,6 +30,13 @@ export type PlanImportLogInput = {
   aktualizovano: string[];
   /** Čísla zařízení smazaných jako INACTIVE. */
   smazano: string[];
+  /**
+   * Čísla zařízení smazaných proto, že jejich řádek/PÚ v NOVÉM souboru vůbec
+   * není přítomný (zdrojový systém ho smazal/sloučil), i když sám nebyl
+   * označený "Stav" = "INACTIVE" – viz porovnání existujících PÚ s novým
+   * souborem v handleSave (app/nahrat/page.tsx).
+   */
+  smazano_zmizele: string[];
 };
 
 /**
@@ -45,11 +52,13 @@ export async function zapisPlanImportLog(input: PlanImportLogInput): Promise<voi
       pridano: input.pridano.length,
       aktualizovano: input.aktualizovano.length,
       smazano: input.smazano.length,
+      smazano_zmizele: input.smazano_zmizele.length,
     },
     polozky: {
       pridano: orizni(input.pridano),
       aktualizovano: orizni(input.aktualizovano),
       smazano: orizni(input.smazano),
+      smazano_zmizele: orizni(input.smazano_zmizele),
     },
   });
 }

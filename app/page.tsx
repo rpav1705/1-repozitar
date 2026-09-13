@@ -299,9 +299,11 @@ type PlanImportLog = {
   pridanoCelkem: number;
   aktualizovanoCelkem: number;
   smazanoCelkem: number;
+  smazanoZmizeleCelkem: number;
   pridano: string[];
   aktualizovano: string[];
   smazano: string[];
+  smazanoZmizele: string[];
 };
 
 type RevizniZpravyImportLog = {
@@ -377,9 +379,12 @@ function useImportLogs() {
             pridanoCelkem: typeof pocty.pridano === "number" ? pocty.pridano : 0,
             aktualizovanoCelkem: typeof pocty.aktualizovano === "number" ? pocty.aktualizovano : 0,
             smazanoCelkem: typeof pocty.smazano === "number" ? pocty.smazano : 0,
+            smazanoZmizeleCelkem:
+              typeof pocty.smazano_zmizele === "number" ? pocty.smazano_zmizele : 0,
             pridano: toStringArray(polozky.pridano),
             aktualizovano: toStringArray(polozky.aktualizovano),
             smazano: toStringArray(polozky.smazano),
+            smazanoZmizele: toStringArray(polozky.smazano_zmizele),
           };
         })();
 
@@ -621,13 +626,18 @@ function DashboardOverview() {
             importLogsLoading
               ? "Načítám…"
               : importLogs?.plan
-                ? `${importLogs.plan.pridanoCelkem} nových, ${importLogs.plan.aktualizovanoCelkem} aktualizovaných, ${importLogs.plan.smazanoCelkem} smazaných (INACTIVE)`
+                ? `${importLogs.plan.pridanoCelkem} nových, ${importLogs.plan.aktualizovanoCelkem} aktualizovaných, ${importLogs.plan.smazanoCelkem} smazaných (INACTIVE)${
+                    importLogs.plan.smazanoZmizeleCelkem > 0
+                      ? `, ${importLogs.plan.smazanoZmizeleCelkem} smazaných (zmizelo ze zdroje)`
+                      : ""
+                  }`
                 : "Zatím žádný záznam importu"
           }
           detailGroups={[
             { label: "Nově přidáno", items: importLogs?.plan?.pridano ?? [] },
             { label: "Aktualizováno", items: importLogs?.plan?.aktualizovano ?? [] },
             { label: "Smazáno (INACTIVE)", items: importLogs?.plan?.smazano ?? [] },
+            { label: "Smazáno (zmizelo ze zdroje)", items: importLogs?.plan?.smazanoZmizele ?? [] },
           ]}
         />
         <ImportLogCard
