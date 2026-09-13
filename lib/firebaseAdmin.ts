@@ -22,14 +22,44 @@ import { getAuth } from "firebase-admin/auth";
  *     pro scripts/reprocess-all-revizni-zpravy.ts (service-account-key.json
  *     v kořeni repa, viz .gitignore – nikdy se necommituje).
  */
+
+/**
+ * Chyba v konfiguraci Firebase Admin SDK na serveru (např. nevalidní nebo
+ * chybějící FIREBASE_SERVICE_ACCOUNT_JSON) – odlišná od chyby přihlášení
+ * uživatele, ať appka (viz app/api/.../route.ts) umí vrátit 500 "rozbitá
+ * konfigurace", ne 401 "nejsi přihlášen/a".
+ */
+export class ChybaKonfiguraceFirebase extends Error {}
+
 function ziskejPoverovaciUdaje() {
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (!json) return applicationDefault();
+
+  let parsovano: Record<string, unknown>;
   try {
-    return cert(JSON.parse(json));
-  } catch {
-    throw new Error(
-      "Proměnná prostředí FIREBASE_SERVICE_ACCOUNT_JSON neobsahuje platný JSON service account klíče."
+    parsovano = JSON.parse(json);
+  } catch (err) {
+    // Nejčastější příčina: proměnná se na Vercelu vložila neúplná/ořezaná,
+    // nebo private_key obsahuje neplatné escape znaky (např. skutečné zalomení
+    // řádku místo "\n"). Skutečnou parse chybu logujeme na server (do Vercel
+    // Logs), appce ale appka vrátí jen srozumitelnou hlášku – ne syrový JSON
+    // parse error ani (natožpak) obsah klíče.
+    console.error("FIREBASE_SERVICE_ACCOUNT_JSON: JSON.parse selhal.", err);
+    throw new ChybaKonfiguraceFirebase(
+      "Proměnná prostředí FIREBASE_SERVICE_ACCOUNT_JSON neobsahuje platný JSON " +
+        "(zkontroluj na Vercelu, že se vložila celá a beze změny – zvlášť řádky " +
+        "v private_key se znaky '\\n')."
+    );
+  }
+
+  try {
+    return cert(parsovano);
+  } catch (err) {
+    console.error("FIREBASE_SERVICE_ACCOUNT_JSON: cert() selhalo.", err);
+    throw new ChybaKonfiguraceFirebase(
+      "Proměnná prostředí FIREBASE_SERVICE_ACCOUNT_JSON je platný JSON, ale chybí v ní nebo je " +
+        "neplatné některé z povinných polí service account klíče (project_id, client_email, " +
+        "private_key)."
     );
   }
 }

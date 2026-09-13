@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { overitIdToken, ziskejAdminFirestore } from "@/lib/firebaseAdmin";
+import { ChybaKonfiguraceFirebase, overitIdToken, ziskejAdminFirestore } from "@/lib/firebaseAdmin";
 import {
   analyzujNesparovaneZpravy,
   PlanovanaRevizeRadek,
@@ -30,6 +30,13 @@ export async function GET(request: NextRequest) {
   try {
     await overitIdToken(request.headers.get("authorization"));
   } catch (err) {
+    // Chyba v konfiguraci Firebase Admin SDK (např. nevalidní
+    // FIREBASE_SERVICE_ACCOUNT_JSON) není totéž co nepřihlášený uživatel –
+    // appka je musí umět rozlišit, jinak appka ukáže matoucí "nejsi
+    // přihlášen/a" i když je ve skutečnosti rozbitá konfigurace na serveru.
+    if (err instanceof ChybaKonfiguraceFirebase) {
+      return NextResponse.json({ error: err.message }, { status: 500 });
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Neplatný nebo chybějící přihlašovací token." },
       { status: 401 }

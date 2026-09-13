@@ -724,13 +724,41 @@ function NesparovaneZpravySection() {
       const res = await fetch(ANALYZA_NESPAROVANYCH_URL, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const json = await res.json();
+      // Nejdřív si přečteme tělo jako text – odpověď serveru se dá takhle
+      // vždycky přečíst, i kdyby náhodou nebyla platný JSON (např. při pádu
+      // serveru bez odpovědi). Teprve pak zkusíme JSON.parse, ať uživatel
+      // nikdy nevidí jen obecné "Unexpected end of JSON input", ale
+      // srozumitelnou hlášku – a skutečný text odpovědi zůstane v konzoli
+      // k dohledání.
+      const text = await res.text();
+      let json: Record<string, unknown> | null = null;
+      if (text) {
+        try {
+          json = JSON.parse(text);
+        } catch (parseErr) {
+          console.error(
+            "Analýza nespárovaných zpráv: server vrátil odpověď, kterou se nepodařilo rozparsovat jako JSON.",
+            { status: res.status, telo: text, parseErr }
+          );
+          throw new Error(
+            `Server vrátil neplatnou odpověď (HTTP ${res.status}) – podrobnosti jsou v konzoli prohlížeče.`
+          );
+        }
+      }
       if (!res.ok) {
         throw new Error(
-          typeof json.error === "string" ? json.error : "Analýzu se nepodařilo spustit."
+          json && typeof json.error === "string"
+            ? json.error
+            : `Analýzu se nepodařilo spustit (HTTP ${res.status}).`
         );
       }
-      setVysledek({ ...json, cas: new Date(json.cas) });
+      if (!json) {
+        console.error("Analýza nespárovaných zpráv: server vrátil prázdnou odpověď.", {
+          status: res.status,
+        });
+        throw new Error("Server vrátil prázdnou odpověď – podrobnosti jsou v konzoli prohlížeče.");
+      }
+      setVysledek({ ...json, cas: new Date(json.cas as string) } as AnalyzaVysledek);
       setOtevrenaSkupina(null);
       setStav("hotovo");
     } catch (err) {
