@@ -142,7 +142,9 @@ type ActiveFilter =
   | "s_zpravou"
   | "vysledek_ok"
   | "vysledek_nok"
-  | "vysledek_ke_kontrole";
+  | "vysledek_ke_kontrole"
+  | "bez_ceny"
+  | "s_cenou";
 
 const FILTER_LABELS: Record<ActiveFilter, string> = {
   all: "Všechny záznamy",
@@ -154,6 +156,8 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   vysledek_ok: "Výsledek revize: OK",
   vysledek_nok: "Výsledek revize: NOK",
   vysledek_ke_kontrole: "Výsledek revize: Ke kontrole",
+  bez_ceny: "Bez ceny",
+  s_cenou: "S cenou",
 };
 
 // Case-insensitive a na diakritice nezávislé porovnání pro fulltextové hledání.
@@ -572,6 +576,9 @@ function DashboardOverview() {
     ? data.rows.filter((row) => row.vysledekRevize === "KE_KONTROLE").length
     : 0;
 
+  const pocetSCenou = data ? data.rows.filter((row) => row.cena !== null).length : 0;
+  const pocetBezCeny = data ? data.rows.length - pocetSCenou : 0;
+
   const stats: {
     label: string;
     value: string;
@@ -760,6 +767,33 @@ function DashboardOverview() {
           </div>
         )}
 
+        {data && (
+          <div className="inline-flex overflow-hidden rounded-md border border-gray-300 text-[12.5px] font-semibold">
+            <button
+              onClick={() => setFilter("bez_ceny")}
+              title="Zobrazit jen zařízení bez ceny v ceníku"
+              className={`px-3 py-2 transition-colors ${
+                filter === "bez_ceny"
+                  ? "bg-status-missing text-white"
+                  : "bg-red-50 text-red-700 hover:bg-red-100"
+              }`}
+            >
+              Bez ceny ({pocetBezCeny})
+            </button>
+            <button
+              onClick={() => setFilter("s_cenou")}
+              title="Zobrazit jen zařízení s cenou v ceníku"
+              className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                filter === "s_cenou"
+                  ? "bg-status-ok text-white"
+                  : "bg-green-50 text-green-700 hover:bg-green-100"
+              }`}
+            >
+              S cenou ({pocetSCenou})
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 border-l border-gray-300 pl-3">
           <span className="text-[11px] font-bold uppercase tracking-wide text-navy">
             Vyhledávání:
@@ -784,6 +818,8 @@ function DashboardOverview() {
                 if (filter === "vysledek_ok") return row.vysledekRevize === "OK";
                 if (filter === "vysledek_nok") return row.vysledekRevize === "NOK";
                 if (filter === "vysledek_ke_kontrole") return row.vysledekRevize === "KE_KONTROLE";
+                if (filter === "bez_ceny") return row.cena === null;
+                if (filter === "s_cenou") return row.cena !== null;
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
               })
               .filter(
