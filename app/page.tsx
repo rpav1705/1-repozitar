@@ -1006,12 +1006,6 @@ function DashboardOverview() {
       <NesparovaneZpravySection />
 
       <div className="flex flex-wrap items-center gap-3">
-        <a
-          href="/nahrat"
-          className="rounded-md bg-accent px-5 py-2.5 text-[13px] font-bold tracking-wide text-white transition-colors hover:bg-orange-600"
-        >
-          + NAHRÁT REVIZI
-        </a>
         {data && data.stats.missingTermin > 0 && (
           <button
             onClick={() => setFilter("missing")}
@@ -1019,7 +1013,7 @@ function DashboardOverview() {
             className={`rounded-md border px-5 py-2.5 text-[13px] font-semibold tracking-wide transition-colors ${
               filter === "missing"
                 ? "border-status-missing bg-status-missing text-white"
-                : "border-status-missing bg-white text-status-missing hover:bg-gray-50"
+                : "border-status-missing/40 bg-zinc-50 text-status-missing hover:border-status-missing hover:bg-zinc-100"
             }`}
           >
             Nutno doplnit data ({data.stats.missingTermin})
@@ -1034,7 +1028,7 @@ function DashboardOverview() {
               className={`px-3 py-2 transition-colors ${
                 filter === "bez_zpravy"
                   ? "bg-status-missing text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
+                  : "bg-red-50 text-red-700 hover:bg-red-100"
               }`}
             >
               Bez platné revizní zprávy ({pocetBezPlatneZpravy})
@@ -1045,7 +1039,7 @@ function DashboardOverview() {
               className={`border-l border-gray-300 px-3 py-2 transition-colors ${
                 filter === "s_zpravou"
                   ? "bg-status-ok text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
+                  : "bg-green-50 text-green-700 hover:bg-green-100"
               }`}
             >
               S platnou revizní zprávou ({pocetSPlatnouZpravou})
@@ -1065,7 +1059,7 @@ function DashboardOverview() {
                 className={`px-3 py-2 transition-colors ${
                   filter === "vysledek_ok"
                     ? "bg-status-ok text-white"
-                    : "bg-white text-gray-600 hover:bg-gray-50"
+                    : "bg-green-50 text-green-700 hover:bg-green-100"
                 }`}
               >
                 OK ({pocetVysledekOk})
@@ -1076,7 +1070,7 @@ function DashboardOverview() {
                 className={`border-l border-gray-300 px-3 py-2 transition-colors ${
                   filter === "vysledek_nok"
                     ? "bg-status-overdue text-white"
-                    : "bg-white text-gray-600 hover:bg-gray-50"
+                    : "bg-red-50 text-red-700 hover:bg-red-100"
                 }`}
               >
                 NOK ({pocetVysledekNok})
@@ -1087,7 +1081,7 @@ function DashboardOverview() {
                 className={`border-l border-gray-300 px-3 py-2 transition-colors ${
                   filter === "vysledek_ke_kontrole"
                     ? "bg-status-warn text-white"
-                    : "bg-white text-gray-600 hover:bg-gray-50"
+                    : "bg-orange-50 text-orange-700 hover:bg-orange-100"
                 }`}
               >
                 Ke kontrole ({pocetVysledekKeKontrole})
