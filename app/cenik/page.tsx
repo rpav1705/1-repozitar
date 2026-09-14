@@ -5,6 +5,7 @@ import {
   collection,
   doc,
   getDocs,
+  limit,
   orderBy,
   query,
   Timestamp,
@@ -402,8 +403,15 @@ function useCenik(reloadKey: number) {
   return { rows, loading, error };
 }
 
-function CenikPrehled({ reloadKey }: { reloadKey: number }) {
-  const { rows, loading, error } = useCenik(reloadKey);
+function CenikPrehled({
+  rows,
+  loading,
+  error,
+}: {
+  rows: CenikRow[] | null;
+  loading: boolean;
+  error: string;
+}) {
   const [searchText, setSearchText] = useState("");
   const trimmedSearch = searchText.trim();
   const searchNeedle = trimmedSearch ? normalizeSearchText(trimmedSearch) : "";
@@ -485,8 +493,207 @@ function CenikPrehled({ reloadKey }: { reloadKey: number }) {
   );
 }
 
+const PLAN_COLLECTION = "planovane_revize";
+// Stejný bezpečnostní strop jako u hlavního přehledu (viz TABLE_LIMIT v
+// app/page.tsx) – appka zařízení pro měsíční náklady čte v jednom dotazu.
+const PLAN_TABLE_LIMIT = 5000;
+
+type PlanTerminRow = {
+  cislo_zarizeni: string;
+  termin: Date;
+};
+
+function usePlanTerminy() {
+  const [rows, setRows] = useState<PlanTerminRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError("");
+      try {
+        const snap = await getDocs(
+          query(collection(db, PLAN_COLLECTION), orderBy("termin", "asc"), limit(PLAN_TABLE_LIMIT))
+        );
+        if (cancelled) return;
+        const loaded: PlanTerminRow[] = [];
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          const cislo_zarizeni = typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "";
+          // Řádky bez termínu (stav "chybi_termin") appka do měsíčního přehledu
+          // nezahrnuje – nedají se zařadit do žádného konkrétního měsíce.
+          if (!cislo_zarizeni || !(data.termin instanceof Timestamp)) return;
+          loaded.push({ cislo_zarizeni, termin: data.termin.toDate() });
+        });
+        setRows(loaded);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Nepodařilo se načíst termíny revizí. Zkus to prosím znovu.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { rows, loading, error };
+}
+
+type MesicniRadek = {
+  mesicKlic: string; // "2026-03" – řadí se podle tohohle
+  mesicDatum: Date; // 1. den měsíce (UTC) – jen pro zobrazení názvu
+  pocetZarizeni: number;
+  pocetBezCeny: number;
+  celkovaCena: number;
+};
+
+function mesicKlic(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Spočítá měsíční náklady na revize – za každé zařízení s termínem
+ * ("Revize platná do") vezme jeho cenu z ceníku (podle čísla zařízení) a
+ * sečte ji do měsíce, do kterého termín spadá. Zařízení, které v ceníku
+ * cenu nemá, se do součtu nezapočítá (appka o něm ale ví a v tabulce ho
+ * u daného měsíce vypíše zvlášť, ať celková cena nevypadá jako kompletní,
+ * i když ve skutečnosti chybí podklad pro část zařízení).
+ */
+function spocitatMesicniNaklady(planRows: PlanTerminRow[], cenyPodleZarizeni: Map<string, number>): MesicniRadek[] {
+  const podleMesice = new Map<string, MesicniRadek>();
+
+  for (const row of planRows) {
+    const klic = mesicKlic(row.termin);
+    let radek = podleMesice.get(klic);
+    if (!radek) {
+      radek = {
+        mesicKlic: klic,
+        mesicDatum: new Date(Date.UTC(row.termin.getUTCFullYear(), row.termin.getUTCMonth(), 1)),
+        pocetZarizeni: 0,
+        pocetBezCeny: 0,
+        celkovaCena: 0,
+      };
+      podleMesice.set(klic, radek);
+    }
+    radek.pocetZarizeni += 1;
+    const cena = cenyPodleZarizeni.get(row.cislo_zarizeni);
+    if (cena === undefined) {
+      radek.pocetBezCeny += 1;
+    } else {
+      radek.celkovaCena += cena;
+    }
+  }
+
+  return Array.from(podleMesice.values()).sort((a, b) => a.mesicKlic.localeCompare(b.mesicKlic));
+}
+
+function formatMesic(d: Date): string {
+  const text = d.toLocaleDateString("cs-CZ", { month: "long", year: "numeric", timeZone: "UTC" });
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * Měsíční náklady na revize – spojuje "Revize platná do" (termín z hlavního
+ * přehledu, kolekce "planovane_revize") s cenou zařízení z ceníku výš. Ceny
+ * appka dostává hotové jako prop (viz CenikPage), ať appka nečte kolekci
+ * "cenik" z Firestore dvakrát.
+ */
+function MesicniNaklady({ cenikRows, cenikLoading }: { cenikRows: CenikRow[] | null; cenikLoading: boolean }) {
+  const { rows: planRows, loading: planLoading, error: planError } = usePlanTerminy();
+
+  const cenyPodleZarizeni = new Map<string, number>();
+  (cenikRows ?? []).forEach((r) => cenyPodleZarizeni.set(r.cislo_zarizeni, r.cena));
+
+  const loading = planLoading || cenikLoading;
+  const mesice = planRows ? spocitatMesicniNaklady(planRows, cenyPodleZarizeni) : [];
+  const dnesniMesic = mesicKlic(new Date());
+  const celkemBezCeny = mesice.reduce((sum, m) => sum + m.pocetBezCeny, 0);
+
+  return (
+    <div className="overflow-hidden rounded-lg bg-white shadow-sm">
+      <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
+        Měsíční náklady na revize (podle „Revize platná do“)
+      </div>
+      <div className="flex flex-col gap-3 px-[18px] py-5">
+        <p className="text-[12.5px] text-gray-500">
+          Za každý měsíc appka sečte cenu (z ceníku výš) u zařízení, jejichž „Revize platná do“ do
+          daného měsíce spadá. Zařízení bez ceny v ceníku appka nezapočítá do součtu – jen jich u
+          měsíce vypíše počet, ať je vidět, že cena za daný měsíc nemusí být úplná.
+        </p>
+
+        {planError && (
+          <p className="rounded-md bg-red-50 px-3 py-2 text-[12.5px] text-red-600">{planError}</p>
+        )}
+
+        {loading && (
+          <div className="py-6 text-center text-[13px] text-gray-400">Načítám…</div>
+        )}
+
+        {!loading && mesice.length === 0 && (
+          <div className="py-6 text-center text-[13px] text-gray-400">
+            Zatím žádná zařízení s termínem revize.
+          </div>
+        )}
+
+        {!loading && mesice.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[12.5px]">
+              <thead>
+                <tr className="border-b border-gray-200 text-gray-500">
+                  <th className="py-1.5 pr-4 font-semibold">Měsíc</th>
+                  <th className="py-1.5 pr-4 font-semibold">Počet zařízení</th>
+                  <th className="py-1.5 pr-4 font-semibold">Bez ceny v ceníku</th>
+                  <th className="py-1.5 pr-4 font-semibold">Celková cena</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mesice.map((m) => (
+                  <tr
+                    key={m.mesicKlic}
+                    className={`border-b border-gray-100 ${m.mesicKlic === dnesniMesic ? "bg-blue-50" : ""}`}
+                  >
+                    <td className="py-1.5 pr-4 font-semibold">
+                      {formatMesic(m.mesicDatum)}
+                      {m.mesicKlic < dnesniMesic && <span className="ml-2 text-[10.5px] font-normal text-gray-400">(uplynulo)</span>}
+                      {m.mesicKlic === dnesniMesic && <span className="ml-2 text-[10.5px] font-normal text-accent">(aktuální)</span>}
+                    </td>
+                    <td className="py-1.5 pr-4">{m.pocetZarizeni}</td>
+                    <td className="py-1.5 pr-4">
+                      {m.pocetBezCeny > 0 ? (
+                        <span className="text-status-warn">{m.pocetBezCeny}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-4 font-semibold">{formatCena(m.celkovaCena)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {celkemBezCeny > 0 && (
+              <p className="mt-2 text-[11px] text-gray-400">
+                Celkem {celkemBezCeny} {celkemBezCeny === 1 ? "zařízení" : "případů zařízení"} napříč měsíci nemá
+                cenu v ceníku – jejich náklad není v součtech zahrnutý.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function CenikPage() {
   const [reloadKey, setReloadKey] = useState(0);
+  const { rows: cenikRows, loading: cenikLoading, error: cenikError } = useCenik(reloadKey);
 
   return (
     <AuthGate>
@@ -497,7 +704,8 @@ export default function CenikPage() {
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <CenikUpload onUlozeno={() => setReloadKey((k) => k + 1)} />
-            <CenikPrehled reloadKey={reloadKey} />
+            <CenikPrehled rows={cenikRows} loading={cenikLoading} error={cenikError} />
+            <MesicniNaklady cenikRows={cenikRows} cenikLoading={cenikLoading} />
           </div>
         </div>
       )}
