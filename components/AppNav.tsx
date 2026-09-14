@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 
 const TABS = [
   { href: "/", label: "Přehled revizí" },
-  { href: "/nahrat", label: "Nahrát dokumenty" },
+  { href: "/nahrat", label: "Import a kontrola" },
   { href: "/administrace", label: "Administrace" },
 ];
 
