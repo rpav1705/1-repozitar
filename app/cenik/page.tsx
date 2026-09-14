@@ -15,6 +15,7 @@ import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
 import { db } from "@/lib/firebase";
+import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import {
   CenikSouborVysledek,
@@ -43,10 +44,6 @@ function normalizeSearchText(text: string): string {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-}
-
-function formatCena(cena: number): string {
-  return `${cena.toLocaleString("cs-CZ")} Kč`;
 }
 
 /**

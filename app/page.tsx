@@ -18,10 +18,12 @@ import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
 import { db } from "@/lib/firebase";
+import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
 
 const PLAN_COLLECTION = "planovane_revize";
+const CENIK_COLLECTION = "cenik";
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
 // bezpečnostní strop, ať jedno načtení nikdy neroztáhne dotaz do nekonečna.
 const TABLE_LIMIT = 5000;
@@ -53,6 +55,8 @@ type PlanRow = {
   vysledekRevize: VysledekRevize | null;
   /** Text zjištěné závady z poslední revizní zprávy, nebo null. */
   zjistenaZavada: string | null;
+  /** Cena revize podle čísla zařízení z kolekce "cenik" (viz app/cenik/page.tsx), nebo null, pokud tam zařízení není. */
+  cena: number | null;
 };
 
 const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: string }> = {
@@ -201,7 +205,7 @@ function useDashboardData() {
         const startOfTodayTs = Timestamp.fromDate(startOfToday);
         const warnUntilTs = Timestamp.fromDate(warnUntil);
 
-        const [totalSnap, overdueSnap, warnSnap, missingSnap, tableSnap] =
+        const [totalSnap, overdueSnap, warnSnap, missingSnap, tableSnap, cenikSnap] =
           await Promise.all([
             getCountFromServer(col),
             getCountFromServer(query(col, where("termin", "<", startOfTodayTs))),
@@ -212,9 +216,21 @@ function useDashboardData() {
             // Firestore řadí null před ostatními hodnotami, takže záznamy bez
             // termínu (stav "chybi_termin") vyjdou v tomto seřazení první.
             getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
+            // Ceny appka spáruje podle čísla zařízení (viz app/cenik/page.tsx) –
+            // stejný přístup jako u výpočtu měsíčních nákladů tam.
+            getDocs(collection(db, CENIK_COLLECTION)),
           ]);
 
         if (cancelled) return;
+
+        const cenyPodleZarizeni = new Map<string, number>();
+        cenikSnap.docs.forEach((d) => {
+          const cenikData = d.data();
+          const cislo = typeof cenikData.cislo_zarizeni === "string" ? cenikData.cislo_zarizeni : "";
+          if (cislo && typeof cenikData.cena === "number") {
+            cenyPodleZarizeni.set(cislo, cenikData.cena);
+          }
+        });
 
         const rows: PlanRow[] = tableSnap.docs.map((d) => {
           const record = d.data();
@@ -249,6 +265,10 @@ function useDashboardData() {
                 ? record.vysledek_revize
                 : null,
             zjistenaZavada: typeof record.zjistena_zavada === "string" ? record.zjistena_zavada : null,
+            cena:
+              typeof record.cislo_zarizeni === "string"
+                ? cenyPodleZarizeni.get(record.cislo_zarizeni) ?? null
+                : null,
           };
         });
 
@@ -822,6 +842,7 @@ function DashboardOverview() {
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-2 pl-[18px] pr-4 font-semibold">Číslo zařízení</th>
                       <th className="py-2 pr-4 font-semibold">Popis</th>
+                      <th className="py-2 pr-4 font-semibold">Cena</th>
                       <th className="py-2 pr-4 font-semibold">Revize platná do:</th>
                       <th className="py-2 pr-4 font-semibold">Provedeno dne</th>
                       <th className="py-2 pr-4 font-semibold">Revizi provedl</th>
@@ -841,6 +862,13 @@ function DashboardOverview() {
                         >
                           <td className="py-2 pl-[14px] pr-4">{row.cislo_zarizeni}</td>
                           <td className="py-2 pr-4">{row.popis}</td>
+                          <td className="py-2 pr-4">
+                            {row.cena !== null ? (
+                              formatCena(row.cena)
+                            ) : (
+                              <span className="text-gray-300">—</span>
+                            )}
+                          </td>
                           <td className="py-2 pr-4">
                             {row.termin ? (
                               // timeZone: "UTC" – kalendářní datum bez času uložené přes Date.UTC()
