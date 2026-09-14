@@ -699,7 +699,7 @@ function DashboardOverview() {
 
         {data && (
           <div className="flex items-center gap-2 border-l border-gray-300 pl-3">
-            <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-navy">
               Výsledek revize
             </span>
             <div className="inline-flex overflow-hidden rounded-md border border-gray-300 text-[12.5px] font-semibold">
@@ -740,13 +740,18 @@ function DashboardOverview() {
           </div>
         )}
 
-        <input
-          type="text"
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          placeholder="Hledat podle čísla zařízení nebo popisu…"
-          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-[13px] outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:w-64"
-        />
+        <div className="flex items-center gap-2 border-l border-gray-300 pl-3">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-navy">
+            Vyhledávání:
+          </span>
+          <input
+            type="text"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="Hledat podle čísla zařízení nebo popisu…"
+            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-[13px] outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:w-64"
+          />
+        </div>
       </div>
 
       {(() => {
