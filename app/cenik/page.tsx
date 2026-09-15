@@ -25,6 +25,7 @@ import {
   vyresitCenikSoubory,
 } from "@/lib/pdfCenik";
 import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
+import { parseCenikXlsx } from "@/lib/xlsxCenik";
 
 const CENIK_COLLECTION = "cenik";
 const BATCH_SIZE = 500;
@@ -67,7 +68,7 @@ function FilePickerButton({
         {label}
         <input
           type="file"
-          accept="application/pdf"
+          accept="application/pdf,.xls,.xlsx"
           multiple
           onChange={(e) => onChange(e.target.files)}
           className="hidden"
@@ -116,7 +117,14 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
       for (const file of files) {
         try {
           const buffer = await file.arrayBuffer();
-          const result = await parseCenikPdf(buffer);
+          // Appka podle přípony souboru pozná, jestli nabídku parsovat jako
+          // PDF protokol (parseCenikPdf – čte souřadnice textu ve
+          // vizuální tabulce) nebo jako Excel/HTML tabulku (parseCenikXlsx –
+          // čte sloupce podle názvu hlavičky, viz lib/xlsxCenik.ts). Obě
+          // vracejí stejný tvar výsledku (ParseCenikResult), dál appka s
+          // nimi zachází stejně.
+          const isXlsx = /\.(xlsx?|xls)$/i.test(file.name);
+          const result = isXlsx ? parseCenikXlsx(buffer) : await parseCenikPdf(buffer);
           if (result.polozky.length === 0) {
             chyby.push({ soubor: file.name, duvod: "v souboru se nenašla žádná položka s číslem zařízení a cenou" });
             continue;
@@ -206,19 +214,21 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
   return (
     <div className="overflow-hidden rounded-lg bg-white shadow-sm">
       <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
-        Import ceníku z cenové nabídky (PDF)
+        Import ceníku z cenové nabídky (PDF / XLS)
       </div>
       <div className="flex flex-col gap-4 px-[18px] py-5">
         <p className="text-[12.5px] text-gray-500">
-          Nahraj jednu nebo víc cenových nabídek (PDF) – appka z každé vytáhne číslo zařízení a cenu
+          Nahraj jednu nebo víc cenových nabídek – appka z každé vytáhne číslo zařízení a cenu
           revize u položek, které mají v nabídce vyplněné číslo zařízení (položky bez něj appka
-          přeskočí, nemá je s čím spárovat). Pokud se stejné zařízení objeví ve víc nabídkách,
-          použije se cena z nejnovější z nich (podle data nabídky).
+          přeskočí, nemá je s čím spárovat). Podporované formáty: PDF protokol (nabídka ILLKO
+          Studio) i tabulka .xls/.xlsx se sloupci Číslo zařízení a Cena (volitelně i Popis, Číslo
+          nabídky a Datum nabídky). Pokud se stejné zařízení objeví ve víc nabídkách, použije se
+          cena z nejnovější z nich (podle data nabídky).
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
-            label="Vybrat soubory (.pdf nabídky)"
+            label="Vybrat soubory (.pdf / .xls nabídky)"
             onChange={(fileList) => {
               setFiles(Array.from(fileList ?? []));
               setPripraveno([]);
