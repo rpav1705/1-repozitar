@@ -709,7 +709,16 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
 
       const sablona = detectSablona(lines);
       if (!sablona) {
-        preskoceno.push({ stranka, duvod: "nerozpoznaný typ revizní zprávy" });
+        // Náhled skutečně přečteného textu (ne jen "nerozpoznáno") – u nové
+        // varianty šablony (nebo PDF s poškozeným/nekompatibilním fontem,
+        // kdy pdf.js přečte jiný text, než jaký je vidět při otevření
+        // souboru) appka bez tohohle náhledu nedá poznat, PROČ detekce
+        // selhala, a je potřeba hádat naslepo.
+        const nahled = lines.join(" ").replace(/\s+/g, " ").trim().slice(0, 200);
+        preskoceno.push({
+          stranka,
+          duvod: `nerozpoznaný typ revizní zprávy (začátek stránky: "${nahled}")`,
+        });
         stranka += 1;
         continue;
       }
