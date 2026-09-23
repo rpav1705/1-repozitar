@@ -508,46 +508,119 @@ function extractStrojZprava(lines: string[]) {
 // proto pro tuhle šablonu spojí řádky NÁSLEDUJÍCÍCH stránek (podle počtu z
 // "Tato zpráva má: N stran") do jedné sady, než zavolá extrakci níž – na
 // rozdíl od šablon A/B, kde je vždycky jedna zpráva = jedna stránka.
+//
+// KRITICKÉ: PDF generátor téhle šablony (ověřeno na DATAPLC01-2026.pdf)
+// rozděluje i JEDNO ČÍSLO/KÓD do víc samostatných textových položek (typicky
+// kvůli kerningu) – a appka je při skládání řádků (reconstructLines) mezi
+// KAŽDOU položkou spojuje dvěma mezerami (viz join("  ") tamtéž), takže se
+// i uprostřed čísla/kódu objeví mezera: "DATAPLC01-2026" se přečte jako
+// "DATAPLC0 1- 202 6", "5.2.2026" jako "5 .2. 202 6" (ověřeno v appce na
+// reálném souboru – appka zprávu jinak úplně přeskočila jako nerozpoznanou).
+// Prostá/slovní pole (jméno technika, "bez zjevných závad") touhle
+// korupcí NEtrpí. Extrakce popisků proto MUSÍ mezi každým znakem popisku
+// tolerovat libovolný počet navíc vložených mezer (viz fuzzy()/
+// findFuzzyValueAfterLabel() níž) a hodnoty číselných/kódových polí se před
+// parsováním zbavují VŠECH mezer (bezpečné – taková pole mezery nikdy
+// legitimně neobsahují), ne jen mezer na hranicích popisku.
 // ---------------------------------------------------------------------------
+
+function escapeRegExpChar(ch: string): string {
+  return ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Sestaví zdroj regexu, který v (potenciálně poškozeném) textu najde `label`
+ * i s libovolně vloženými/chybějícími mezerami MEZI JEDNOTLIVÝMI ZNAKY (viz
+ * komentář u šablony C výš) – appka nejdřív z `label` odstraní VŠECHNY
+ * mezery (na jejich přesném původním počtu/umístění stejně nejde stavět,
+ * viz tamní komentář – appka je vůbec nepoužívá) a mezi KAŽDOU dvojici
+ * zbylých znaků povolí libovolný počet mezer (`\s*`, tedy i nula – pro
+ * případ, že by PDF naopak nějakou legitimní mezeru úplně smazalo, ne jen
+ * přidalo navíc).
+ */
+function fuzzy(label: string): string {
+  return label
+    .replace(/\s+/g, "")
+    .split("")
+    .map((ch) => escapeRegExpChar(ch) + "\\s*")
+    .join("");
+}
+
+/** Fuzzy varianta findValueAfterLabel (viz fuzzy() výš) – vrátí zbytek řádku ZA popiskem. */
+function findFuzzyValueAfterLabel(lines: string[], label: string): string | null {
+  const re = new RegExp(fuzzy(label) + "(.*)", "i");
+  for (const line of lines) {
+    const match = line.match(re);
+    if (match) return match[1];
+  }
+  return null;
+}
 
 /**
  * "Revize ev. č. DATAPLC01-2026" – appka jako číslo zařízení bere kód PŘED
  * koncovou pomlčkou a rokem (ten se mění revizi od revize, samotné zařízení
- * ne). Bez rozpoznaného roku (neobvyklý formát evidenčního čísla) se použije
- * celý zachycený kód beze změny, ať appka radši zkusí spárovat s plánem
- * "syrový" kód než revizní zprávu rovnou přeskočit.
+ * ne). Zachycená hodnota se před tím zbaví VŠECH mezer (viz komentář u
+ * šablony C výš – appka ji jinak nespáruje ani s obyčejnou pomlčkou v kódu,
+ * natož s rokem na konci). Bez rozpoznaného roku (neobvyklý formát
+ * evidenčního čísla) se použije celý zachycený kód beze změny, ať appka
+ * radši zkusí spárovat s plánem "syrový" kód než revizní zprávu rovnou
+ * přeskočit.
  */
 function extractCisloZarizeniZarizeni(lines: string[]): string | null {
-  const raw = findValueAfterLabel(lines, /Revize\s+ev\.\s*č\.?\s*([^\s]+)/i);
-  return raw ? raw.replace(/-\d{4}$/, "") : null;
+  const raw = findFuzzyValueAfterLabel(lines, "Revize ev. č.");
+  if (!raw) return null;
+  const cislo = raw.replace(/\s+/g, "");
+  return cislo ? cislo.replace(/-\d{4}$/, "") : null;
 }
 
+/**
+ * Datum appka hledá ve zbytku řádku ZA popiskem (ten na týhle šabloně sdílí
+ * řádek se sloupcem revizního technika, viz reálná zpráva – "Datum ukončení
+ * revize: 5.2.2026  Jméno: David Kadlec…") – VŠECHNY mezery se odstraní
+ * ještě PŘED voláním parseFlexibleDate (ne až jako záložní pokus), protože
+ * poškozené mezery uprostřed roku ("202 6") by jinak numerickou skupinu
+ * uřízly na míň číslic a datum by se naparsovalo TICHÝM OMYLEM (rok "202"
+ * misto "2026"), ne že by se rozpoznání jen nepovedlo.
+ */
 function extractDatumProvedeniZarizeni(lines: string[]): Date | null {
   const raw =
-    findValueAfterLabel(lines, /Datum\s+ukončení\s+revize:\s*(\d{1,2}\.\d{1,2}\.\d{4})/i) ??
-    findValueAfterLabel(lines, /Datum\s+zahájení\s+revize:\s*(\d{1,2}\.\d{1,2}\.\d{4})/i);
-  return raw ? parseFlexibleDate(raw) : null;
+    findFuzzyValueAfterLabel(lines, "Datum ukončení revize:") ??
+    findFuzzyValueAfterLabel(lines, "Datum zahájení revize:");
+  return raw ? parseFlexibleDate(raw.replace(/\s+/g, "")) : null;
 }
 
+/** Viz komentář u extractDatumProvedeniZarizeni výš – stejný důvod odstranění mezer před parsováním. */
 function extractTerminZarizeni(lines: string[]): Date | null {
-  const raw = findValueAfterLabel(lines, /Doporučený\s+termín\s+další\s+revize:\s*(.+)/i);
-  return raw ? parseTerminHodnota(raw) : null;
+  const raw = findFuzzyValueAfterLabel(lines, "Doporučený termín další revize:");
+  return raw ? parseTerminHodnota(raw.replace(/\s+/g, "")) : null;
 }
 
 /**
  * "Jméno:  David Kadlec, Rušinov 1, Rušinov" – jméno je jen první část před
- * první čárkou, zbytek je adresa technika. Stejný popisek "Jméno:" se na
- * zprávě objevuje ještě jednou dole u nevyplněného razítka "Revizní zprávu
- * převzal:" (jen tečkovaná čára bez čárky) – findValueAfterLabel vrací PRVNÍ
- * shodu v pořadí řádků, tedy tu u revizního technika nahoře na stránce.
+ * první čárkou, zbytek je adresa technika. Na rozdíl od číselných polí výš
+ * appka mezery v zachycené hodnotě NEODSTRAŇUJE – jméno je prostý text (ne
+ * kód/datum), skutečná mezera mezi jménem a příjmením je tu legitimní a
+ * ověřeno (viz komentář u šablony C výš), že slovní pole touhle PDF
+ * korupcí netrpí. Stejný popisek "Jméno:" se na zprávě objevuje ještě
+ * jednou dole u nevyplněného razítka "Revizní zprávu převzal:" (jen
+ * tečkovaná čára bez čárky) – findFuzzyValueAfterLabel vrací PRVNÍ shodu v
+ * pořadí řádků, tedy tu u revizního technika nahoře na stránce.
  */
 function extractTechnikJmenoZarizeni(lines: string[]): string | null {
-  const raw = findValueAfterLabel(lines, /Jméno:\s*([^,]+)/i);
-  return raw ? raw.trim() : null;
+  const raw = findFuzzyValueAfterLabel(lines, "Jméno:");
+  if (!raw) return null;
+  const jmeno = raw.split(",")[0]?.trim();
+  return jmeno || null;
 }
 
+/**
+ * "Ev. číslo: 2578/24/R-EZ-E1A, E1B" – appka mezery odstraní stejně jako u
+ * čísla zařízení výš (kódové pole, mezery v něm nejsou legitimní, jen
+ * artefakt poškozeného fontu PDF – viz komentář u šablony C).
+ */
 function extractCisloOpravneniZarizeni(lines: string[]): string | null {
-  return findValueAfterLabel(lines, /Ev\.\s*číslo:\s*(.+)/i);
+  const raw = findFuzzyValueAfterLabel(lines, "Ev. číslo:");
+  return raw ? raw.replace(/\s+/g, "") : null;
 }
 
 /**
@@ -643,12 +716,19 @@ function detectSablona(lines: string[]): Sablona | null {
   const text = lines.join("\n");
   if (/revizi elektrického zařízení pracovního stroje/.test(text)) return "pracovni_stroj";
   if (/revizi elektrického spotřebiče/.test(text)) return "spotrebic";
-  // Case-insensitive a samostatně (na rozdíl od šablon výš) – nadpis "ZPRÁVA
-  // O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ" je na reálné zprávě celý velkými písmeny.
-  // Kontrola "pracovního stroje" výš proběhne vždycky první (viz pořadí
-  // if větví), takže se šablony nemůžou splést i přes společný podřetězec
-  // "elektrického zařízení".
-  if (/zpráva\s+o\s+revizi\s+elektrického\s+zařízení\b/i.test(text)) return "elektricke_zarizeni";
+  // Case-insensitive, fuzzy (viz fuzzy() výš) a samostatně (na rozdíl od
+  // šablon výš) – nadpis "ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ" je na
+  // reálné zprávě celý velkými písmeny a appka u týhle šablony obecně nesmí
+  // spoléhat na přesné mezery (viz komentář u šablony C). Kontrola
+  // "pracovního stroje" výš proběhne vždycky první (viz pořadí if větví),
+  // takže se šablony nemůžou splést i přes společný podřetězec "elektrického
+  // zařízení". BEZ koncového \b – v JS regexu bez "u" příznaku "\b" bere
+  // "\w" jako ASCII-only ([A-Za-z0-9_]), takže hned za českým písmenem s
+  // diakritikou (zařízen-Í) hranici slova vůbec nepozná a celý match by
+  // tiše selhal.
+  if (new RegExp(fuzzy("zpráva o revizi elektrického zařízení"), "i").test(text)) {
+    return "elektricke_zarizeni";
+  }
   return null;
 }
 
