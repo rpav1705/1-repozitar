@@ -714,10 +714,10 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
         // kdy pdf.js přečte jiný text, než jaký je vidět při otevření
         // souboru) appka bez tohohle náhledu nedá poznat, PROČ detekce
         // selhala, a je potřeba hádat naslepo.
-        const nahled = lines.join(" ").replace(/\s+/g, " ").trim().slice(0, 200);
+        const nahled = lines.join(" | ").replace(/[ \t]+/g, " ").trim();
         preskoceno.push({
           stranka,
-          duvod: `nerozpoznaný typ revizní zprávy (začátek stránky: "${nahled}")`,
+          duvod: `nerozpoznaný typ revizní zprávy (obsah stránky: "${nahled}")`,
         });
         stranka += 1;
         continue;
