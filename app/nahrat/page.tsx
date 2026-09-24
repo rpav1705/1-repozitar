@@ -48,6 +48,15 @@ import { useAuth } from "@/lib/useAuth";
 const BATCH_SIZE = 500;
 
 /**
+ * Appka jí označí chybu z bezpečnostní pojistky proti hromadnému smazání
+ * "zmizelých" zařízení (viz handleSave níž) – na rozdíl od běžné chyby
+ * ukládání appka NESMÍ její zprávu přepsat obecnou hláškou z
+ * describeSaveError (ta by uživateli schovala přesný důvod a počty, které
+ * potřebuje k rozhodnutí, jestli je soubor opravdu v pořádku).
+ */
+class NeprimereneZmizelaZarizeniError extends Error {}
+
+/**
  * Vlastní tlačítko pro výběr souboru MÍSTO nativního vzhledu prohlížeče
  * ("Choose File(s) / No file(s) chosen") – ten appka nemohla přes CSS
  * dostatečně přizpůsobit (text tlačítka "file:" pseudo-třída Tailwindu
@@ -281,6 +290,39 @@ function PlanUpload() {
         if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
       }
 
+      // Bezpečnostní pojistka PROTI hromadnému smazání kvůli neúplnému/
+      // špatnému souboru – zařízení, jejichž PÚ v nově nahraném souboru
+      // vůbec není (viz "zmizelá" zařízení níž, po zápisu/mazání dávek),
+      // appka považuje za zdrojovým systémem skutečně odstraněné a TRVALE
+      // je smaže i s revizními zprávami a PDF (viz smazNeaktivniZarizeni).
+      // Běžný export z Maxima obsahuje VŠECHNA aktivní zařízení, takže
+      // "zmizelých" bývá jen pár (řádově jednotky) – když jich vyjde
+      // nepřiměřeně moc, soubor byl skoro jistě neúplný/špatný (přesně
+      // tohle appku reálně přivedlo k tomu, že smazala 329 z 2891 zařízení,
+      // než si toho někdo stihl všimnout a zastavit to). Kontrola proběhne
+      // PŘED jakýmkoli zápisem (ne až u samotného mazání zmizelých níž), ať
+      // podezřelý soubor neudělá ani částečný/nekonzistentní zápis nových
+      // řádků.
+      const ZMIZELA_ABSOLUTNI_PRAH = 20;
+      const ZMIZELA_PROCENTO_PRAH = 0.05;
+      const zmizelaKandidatuPocet = existingSnap.docs.filter((d) => {
+        const pu = d.data().pu;
+        return typeof pu === "string" && pu !== "" && !noveIdsVSouboru.has(d.id);
+      }).length;
+      if (
+        zmizelaKandidatuPocet > ZMIZELA_ABSOLUTNI_PRAH &&
+        zmizelaKandidatuPocet > existingIds.size * ZMIZELA_PROCENTO_PRAH
+      ) {
+        const procento = existingIds.size > 0 ? (zmizelaKandidatuPocet / existingIds.size) * 100 : 100;
+        throw new NeprimereneZmizelaZarizeniError(
+          `Soubor vypadá neúplný nebo špatný – chybí v něm ${zmizelaKandidatuPocet} z ${existingIds.size} ` +
+            `zařízení, která appka eviduje (${procento.toFixed(1)} %). Appka by je jinak označila za ` +
+            `zdrojovým systémem odstraněné a TRVALE smazala i s jejich revizními zprávami a PDF – proto ` +
+            `import vůbec neproběhl (ani nové/aktualizované řádky). Zkontroluj prosím, že jde o kompletní ` +
+            `export z Maxima, a zkus to nahrát znovu.`
+        );
+      }
+
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
         const batch = writeBatch(db);
@@ -415,7 +457,10 @@ function PlanUpload() {
 
       setStatus("saved");
     } catch (err) {
-      setError(describeSaveError(err));
+      // Viz komentář u NeprimereneZmizelaZarizeniError – tahle konkrétní
+      // chyba MÁ vlastní srozumitelnou zprávu s počty, describeSaveError by
+      // ji přepsal obecnou hláškou o "nepodařilo se uložit".
+      setError(err instanceof NeprimereneZmizelaZarizeniError ? err.message : describeSaveError(err));
       setStatus("error");
     } finally {
       clearInterval(heartbeatId);
