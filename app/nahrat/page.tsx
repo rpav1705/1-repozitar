@@ -48,15 +48,6 @@ import { useAuth } from "@/lib/useAuth";
 const BATCH_SIZE = 500;
 
 /**
- * Appka jí označí chybu z bezpečnostní pojistky proti hromadnému smazání
- * "zmizelých" zařízení (viz handleSave níž) – na rozdíl od běžné chyby
- * ukládání appka NESMÍ její zprávu přepsat obecnou hláškou z
- * describeSaveError (ta by uživateli schovala přesný důvod a počty, které
- * potřebuje k rozhodnutí, jestli je soubor opravdu v pořádku).
- */
-class NeprimereneZmizelaZarizeniError extends Error {}
-
-/**
  * Vlastní tlačítko pro výběr souboru MÍSTO nativního vzhledu prohlížeče
  * ("Choose File(s) / No file(s) chosen") – ten appka nemohla přes CSS
  * dostatečně přizpůsobit (text tlačítka "file:" pseudo-třída Tailwindu
@@ -152,16 +143,6 @@ type NeaktivniVysledek = {
   bezPu: number;
 };
 
-// Výsledek úklidu záznamů, jejichž PÚ v novém souboru vůbec není přítomný
-// (na rozdíl od NeaktivniVysledek u nich nedává smysl "bezPu" – jde vždycky
-// o existující záznamy, které PÚ v databázi už mají).
-type ZmizeleVysledek = {
-  zpracovano: number;
-  planSmazano: number;
-  zpravSmazano: number;
-  souboruSmazano: number;
-};
-
 /**
  * Banner nad všemi třemi sekcemi téhle stránky – ukáže, jestli právě (i
  * v JINÉ kartě/prohlížeči/u jiného uživatele) běží import plánu nebo
@@ -192,7 +173,6 @@ function PlanUpload() {
   const [error, setError] = useState("");
   const [savedCount, setSavedCount] = useState(0);
   const [neaktivniVysledek, setNeaktivniVysledek] = useState<NeaktivniVysledek | null>(null);
-  const [zmizeleVysledek, setZmizeleVysledek] = useState<ZmizeleVysledek | null>(null);
 
   const missingTerminCount = rows.filter((row) => !row.termin).length;
 
@@ -207,7 +187,6 @@ function PlanUpload() {
       setSkipped(result.skipped);
       setInactiveRows(result.inactive);
       setNeaktivniVysledek(null);
-      setZmizeleVysledek(null);
       setStatus("parsed");
     } catch (err) {
       setError(
@@ -249,7 +228,6 @@ function PlanUpload() {
     setStatus("saving");
     setSavedCount(0);
     setNeaktivniVysledek(null);
-    setZmizeleVysledek(null);
     try {
       const col = collection(db, "planovane_revize");
 
@@ -276,52 +254,6 @@ function PlanUpload() {
       const pridanoList: string[] = [];
       const aktualizovanoList: string[] = [];
       const smazanoList: string[] = [];
-
-      // Množina VŠECH PÚ přítomných v novém souboru (aktivní i INACTIVE řádky
-      // – ty jsou v souboru pořád přítomné, jen se neimportují) – použije se
-      // níž k odhalení PÚ, které v novém souboru už vůbec nejsou (zdrojový
-      // systém daný řádek/PÚ smazal/sloučil), viz úklid "zmizelých" záznamů
-      // za oběma dávkami zápisu/mazání.
-      const noveIdsVSouboru = new Set<string>();
-      for (const row of rows) {
-        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
-      }
-      for (const row of inactiveRows) {
-        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
-      }
-
-      // Bezpečnostní pojistka PROTI hromadnému smazání kvůli neúplnému/
-      // špatnému souboru – zařízení, jejichž PÚ v nově nahraném souboru
-      // vůbec není (viz "zmizelá" zařízení níž, po zápisu/mazání dávek),
-      // appka považuje za zdrojovým systémem skutečně odstraněné a TRVALE
-      // je smaže i s revizními zprávami a PDF (viz smazNeaktivniZarizeni).
-      // Běžný export z Maxima obsahuje VŠECHNA aktivní zařízení, takže
-      // "zmizelých" bývá jen pár (řádově jednotky) – když jich vyjde
-      // nepřiměřeně moc, soubor byl skoro jistě neúplný/špatný (přesně
-      // tohle appku reálně přivedlo k tomu, že smazala 329 z 2891 zařízení,
-      // než si toho někdo stihl všimnout a zastavit to). Kontrola proběhne
-      // PŘED jakýmkoli zápisem (ne až u samotného mazání zmizelých níž), ať
-      // podezřelý soubor neudělá ani částečný/nekonzistentní zápis nových
-      // řádků.
-      const ZMIZELA_ABSOLUTNI_PRAH = 20;
-      const ZMIZELA_PROCENTO_PRAH = 0.05;
-      const zmizelaKandidatuPocet = existingSnap.docs.filter((d) => {
-        const pu = d.data().pu;
-        return typeof pu === "string" && pu !== "" && !noveIdsVSouboru.has(d.id);
-      }).length;
-      if (
-        zmizelaKandidatuPocet > ZMIZELA_ABSOLUTNI_PRAH &&
-        zmizelaKandidatuPocet > existingIds.size * ZMIZELA_PROCENTO_PRAH
-      ) {
-        const procento = existingIds.size > 0 ? (zmizelaKandidatuPocet / existingIds.size) * 100 : 100;
-        throw new NeprimereneZmizelaZarizeniError(
-          `Soubor vypadá neúplný nebo špatný – chybí v něm ${zmizelaKandidatuPocet} z ${existingIds.size} ` +
-            `zařízení, která appka eviduje (${procento.toFixed(1)} %). Appka by je jinak označila za ` +
-            `zdrojovým systémem odstraněné a TRVALE smazala i s jejich revizními zprávami a PDF – proto ` +
-            `import vůbec neproběhl (ani nové/aktualizované řádky). Zkontroluj prosím, že jde o kompletní ` +
-            `export z Maxima, a zkus to nahrát znovu.`
-        );
-      }
 
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
@@ -398,57 +330,23 @@ function PlanUpload() {
         });
       }
 
-      // Existující záznamy, jejichž PÚ v NOVÉM souboru vůbec není přítomný
-      // (ani jako aktivní, ani jako INACTIVE) – zdrojový systém daný
-      // řádek/PÚ smazal/sloučil přímo u sebe, aniž by ho označil jako
-      // INACTIVE. Appka je smaže úplně stejně jako řádky se Stavem
-      // INACTIVE (smazNeaktivniZarizeni níž se navíc postará i o revizní
-      // zprávy – ty jsou spárované podle čísla zařízení, ne podle
-      // konkrétního PÚ, takže se samy "převáží" na zbývající řádek stejného
-      // zařízení a smažou se jen tehdy, když už u čísla zařízení nezůstal
-      // v plánu žádný jiný záznam). Týká se jen záznamů vzniklých z
-      // PÚ-klíčovaného importu (mají vyplněné pole "pu") – záznamy bez PÚ
-      // (vzniklé kdysi s náhodným ID, appka je needituje) takhle spárovat
-      // nejde, necháme je beze změny. Obecná logika, netýká se jen
-      // "skupiny C" – čistí se tak i budoucí podobné případy u libovolného
-      // zařízení.
-      let zmizeleZpracovano = 0;
-      let zmizelePlanSmazano = 0;
-      let zmizeleZpravSmazano = 0;
-      let zmizeleSouboruSmazano = 0;
-      const smazanoZmizeleList: string[] = [];
-      for (const existingDoc of existingSnap.docs) {
-        const existingData = existingDoc.data();
-        const existingPu = typeof existingData.pu === "string" ? existingData.pu : "";
-        if (!existingPu) continue;
-        if (noveIdsVSouboru.has(existingDoc.id)) continue;
-
-        zmizeleZpracovano += 1;
-        const existingCisloZarizeni =
-          typeof existingData.cislo_zarizeni === "string" ? existingData.cislo_zarizeni : "";
-        const vysledek = await smazNeaktivniZarizeni(existingDoc.id, existingCisloZarizeni);
-        if (vysledek.planSmazan) {
-          zmizelePlanSmazano += 1;
-          smazanoZmizeleList.push(existingCisloZarizeni);
-        }
-        zmizeleZpravSmazano += vysledek.smazanoZaznamu;
-        zmizeleSouboruSmazano += vysledek.smazanoSouboru;
-      }
-      if (zmizeleZpracovano > 0) {
-        setZmizeleVysledek({
-          zpracovano: zmizeleZpracovano,
-          planSmazano: zmizelePlanSmazano,
-          zpravSmazano: zmizeleZpravSmazano,
-          souboruSmazano: zmizeleSouboruSmazano,
-        });
-      }
-
+      // Appka záměrně NEmaže zařízení jen kvůli tomu, že jejich PÚ v nově
+      // nahraném souboru chybí – import je čistě přírůstkový/aktualizační
+      // (přidá nové, aktualizuje existující podle řádků, co v souboru
+      // opravdu jsou) a nikdy nesmí zasáhnout zařízení mimo něj. Jediný
+      // způsob, jak appka zařízení maže, je výslovný "Stav" = "INACTIVE" u
+      // KONKRÉTNÍHO řádku výš – ne nepřítomnost. Appka dřív navíc takhle
+      // "zmizelé" (nepřítomné) záznamy sama mazala i s revizními zprávami a
+      // PDF – u neúplného/špatného souboru (např. omylem nahraného výřezu
+      // pár řádků místo celého exportu) to reálně smazalo 329 z 2891
+      // zařízení, než si toho někdo stihl všimnout. Appka žádné zálohy ani
+      // point-in-time recovery nemá, takže se to nedalo jednoduše vrátit.
       try {
         await zapisPlanImportLog({
           pridano: pridanoList,
           aktualizovano: aktualizovanoList,
           smazano: smazanoList,
-          smazano_zmizele: smazanoZmizeleList,
+          smazano_zmizele: [],
         });
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
@@ -457,10 +355,7 @@ function PlanUpload() {
 
       setStatus("saved");
     } catch (err) {
-      // Viz komentář u NeprimereneZmizelaZarizeniError – tahle konkrétní
-      // chyba MÁ vlastní srozumitelnou zprávu s počty, describeSaveError by
-      // ji přepsal obecnou hláškou o "nepodařilo se uložit".
-      setError(err instanceof NeprimereneZmizelaZarizeniError ? err.message : describeSaveError(err));
+      setError(describeSaveError(err));
       setStatus("error");
     } finally {
       clearInterval(heartbeatId);
@@ -483,9 +378,9 @@ function PlanUpload() {
           <code className="rounded bg-gray-100 px-1 py-0.5">chybi_termin</code>, ať se dají dohledat
           a ručně doplnit. Řádky se sloupcem &bdquo;Stav&ldquo; = &bdquo;INACTIVE&ldquo; se NEnaimportují –
           existující záznam pro dané zařízení (a jeho revizní zprávy) se naopak smaže, appka
-          neaktivní zařízení nedrží. Appka navíc při každém importu smaže i existující záznamy,
-          jejichž PÚ v novém souboru vůbec není přítomný (zdroj daný řádek/PÚ smazal nebo sloučil,
-          i když ho neoznačil jako INACTIVE) – ostatních, nezměněných záznamů se import nedotýká.
+          neaktivní zařízení nedrží. Import je jinak čistě přírůstkový/aktualizační – appka přidá
+          nové a aktualizuje existující řádky podle toho, co je v souboru, a zařízení, která v
+          souboru chybí, se nijak nedotkne (klidně nahraj i jen výřez pár řádků).
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -498,7 +393,6 @@ function PlanUpload() {
               setSkipped([]);
               setInactiveRows([]);
               setNeaktivniVysledek(null);
-              setZmizeleVysledek(null);
               setStatus("idle");
             }}
             selectedText={file ? file.name : "Žádný soubor nevybrán"}
@@ -568,15 +462,6 @@ function PlanUpload() {
                 {neaktivniVysledek.bezPu > 0 &&
                   ` (${neaktivniVysledek.bezPu} nešlo automaticky spárovat – chybí PÚ)`}
                 .
-              </p>
-            )}
-
-            {status === "saved" && zmizeleVysledek && (
-              <p className="rounded-md bg-gray-100 px-3 py-2 text-[12.5px] text-gray-600">
-                Zmizelé řádky (PÚ v novém souboru už vůbec není, i když nebyl označen INACTIVE):
-                nalezeno {zmizeleVysledek.zpracovano}, smazáno {zmizeleVysledek.planSmazano} záznamů z
-                plánu, {zmizeleVysledek.zpravSmazano} revizních zpráv a {zmizeleVysledek.souboruSmazano}{" "}
-                PDF souborů ze Storage.
               </p>
             )}
 
