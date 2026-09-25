@@ -608,7 +608,7 @@ function pluralizeSoubor(count: number): string {
   return "souborů";
 }
 
-function RevizniZpravyUpload() {
+function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
   const { user } = useAuth();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
@@ -817,6 +817,14 @@ function RevizniZpravyUpload() {
     setProcessed(allProcessed);
     setSkippedPages(allSkipped);
     setStatus(allProcessed.length === 0 && allSkipped.length === 0 ? "idle" : "done");
+    // Sekce "Znovu zpracovat uložené revizní zprávy" (RevizniZpravyReprocess)
+    // si počet zpráv ke zpracování zjišťuje jen jednou při zamountování –
+    // bez týhle notifikace by po nahrání nových zpráv tady nahoře ukazovala
+    // starý (nižší) počet, dokud by uživatel stránku ručně neobnovil nebo na
+    // ni znovu nepřišel. Volá se jen když se opravdu něco zapsalo (viz
+    // allProcessed.length výš) – u dávky, která se celá jen přeskočila,
+    // netřeba nic přepočítávat.
+    if (allProcessed.length > 0) onUlozeno();
     } finally {
       clearInterval(heartbeatId);
       await uvolniZamek();
@@ -1219,7 +1227,7 @@ function smazatReprocessCheckpoint() {
  * ukládá do localStorage (viz ReprocessCheckpoint) – při příštím spuštění
  * appka nabídne pokračovat jen se zbývajícími, místo aby začínala od nuly.
  */
-function RevizniZpravyReprocess() {
+function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
   const { user } = useAuth();
   const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
@@ -1299,9 +1307,14 @@ function RevizniZpravyReprocess() {
   // Zjištění počtů se stejnou logikou (vyberAktualniZpravy +
   // jeZpracovanoReprocessem), jakou pak použije samotné zpracování – ať
   // čísla u tlačítek sedí s tím, co appka po kliknutí skutečně zpracuje.
+  // "reloadKey" (viz NahratPage) se zvýší po úspěšném nahrání nových
+  // revizních zpráv v RevizniZpravyUpload výš na stránce – bez něj by
+  // appka počty přepočítala jen jednou při zamountování a po nahrání by
+  // ukazovala starý (nižší) počet, dokud by uživatel stránku ručně
+  // neobnovil.
   useEffect(() => {
     nacistPocty();
-  }, []);
+  }, [reloadKey]);
 
   const handleReprocess = async (mod: ReprocessMod, moznosti?: { pokracovat?: boolean }) => {
     if (bezicíZpracovani) {
@@ -2275,6 +2288,12 @@ function NesparovaneZpravySection() {
 }
 
 export default function NahratPage() {
+  // Zvýší se po úspěšném nahrání nových revizních zpráv v RevizniZpravyUpload
+  // – RevizniZpravyReprocess si podle něj přepočítá "Ke zpracování: N
+  // nových…" (jinak by ten počet zůstal starý, dokud by uživatel stránku
+  // ručně neobnovil, viz komentář tam).
+  const [revizniZpravyReloadKey, setRevizniZpravyReloadKey] = useState(0);
+
   return (
     <AuthGate>
       {(user) => (
@@ -2285,8 +2304,8 @@ export default function NahratPage() {
           <div className="flex flex-col gap-4 px-7 py-6">
             <ZamekBanner />
             <PlanUpload />
-            <RevizniZpravyUpload />
-            <RevizniZpravyReprocess />
+            <RevizniZpravyUpload onUlozeno={() => setRevizniZpravyReloadKey((k) => k + 1)} />
+            <RevizniZpravyReprocess reloadKey={revizniZpravyReloadKey} />
             <NesparovaneZpravySection />
           </div>
         </div>
