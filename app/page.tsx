@@ -626,15 +626,19 @@ function DashboardOverview() {
               disabled={!clickable}
               onClick={() => s.filterValue && setFilter(s.filterValue)}
               title={clickable ? `Zobrazit jen: ${s.label}` : "Zatím bez dat"}
-              className={`rounded-lg border-l-4 px-[18px] py-4 text-left shadow-sm transition-all ${
+              className={`rounded-lg border-l-4 px-[18px] py-4 text-left transition-all ${
                 isActive
                   ? // Plný sytý podklad V BARVĚ karty + bílý text, stejný vzor jako
                     // aktivní stav tlačítka "Nutno doplnit data" níž (border-status-missing
                     // bg-status-missing text-white) – appka barvy definuje přes sdílené
                     // tokeny v app/globals.css, takže "bg-<token>" existuje pro každou
                     // stejně jako "border-<token>" (odvozeno z s.color.split(" ")[0]).
-                    `border-transparent ${s.color.split(" ")[0].replace("border-", "bg-")}`
-                  : `bg-white ${s.color.split(" ")[0]}`
+                    // Silnější stín + mírné zvětšení navíc dají kartě dojem, že "vystoupí"
+                    // nad ostatní (3D efekt), ne jen že změnila barvu.
+                    `border-transparent shadow-xl scale-[1.03] ${s.color
+                      .split(" ")[0]
+                      .replace("border-", "bg-")}`
+                  : `bg-white shadow-sm ${s.color.split(" ")[0]}`
               } ${clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"}`}
             >
               <div
