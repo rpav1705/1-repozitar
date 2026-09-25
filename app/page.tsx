@@ -626,9 +626,20 @@ function DashboardOverview() {
               disabled={!clickable}
               onClick={() => s.filterValue && setFilter(s.filterValue)}
               title={clickable ? `Zobrazit jen: ${s.label}` : "Zatím bez dat"}
-              className={`rounded-lg border-l-4 bg-white px-[18px] py-4 text-left shadow-sm transition-shadow ${s.color.split(" ")[0]} ${
+              className={`rounded-lg border-l-4 px-[18px] py-4 text-left shadow-sm transition-all ${s.color.split(" ")[0]} ${
                 clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"
-              } ${isActive ? "ring-2 ring-navy ring-offset-1" : ""}`}
+              } ${
+                isActive
+                  ? // Výraznější vybraný stav než tenký prstenec kolem karty – vlastní
+                    // sytější podklad a silnější prstenec V BARVĚ karty (stejný název
+                    // odstínu jako "border-X" výš, jen "ring-X" – appka barvy definuje
+                    // přes sdílené tokeny v app/globals.css, takže "ring-<token>" i
+                    // "bg-<token>/15" existují pro každou z nich stejně jako "border-<token>").
+                    `${s.color.split(" ")[0].replace("border-", "bg-")}/15 ring-2 ring-inset ${s.color
+                      .split(" ")[0]
+                      .replace("border-", "ring-")}`
+                  : "bg-white"
+              }`}
             >
               <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
                 {s.label}
