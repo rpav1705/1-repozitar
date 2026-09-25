@@ -626,28 +626,32 @@ function DashboardOverview() {
               disabled={!clickable}
               onClick={() => s.filterValue && setFilter(s.filterValue)}
               title={clickable ? `Zobrazit jen: ${s.label}` : "Zatím bez dat"}
-              className={`rounded-lg border-l-4 px-[18px] py-4 text-left shadow-sm transition-all ${s.color.split(" ")[0]} ${
-                clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"
-              } ${
+              className={`rounded-lg border-l-4 px-[18px] py-4 text-left shadow-sm transition-all ${
                 isActive
-                  ? // Výraznější vybraný stav než tenký prstenec kolem karty – vlastní
-                    // sytější podklad a silnější (3px) prstenec V BARVĚ karty (stejný
-                    // název odstínu jako "border-X" výš, jen "ring-X"/"bg-X" – appka
-                    // barvy definuje přes sdílené tokeny v app/globals.css, takže
-                    // existují pro každou z nich stejně jako "border-<token>").
-                    `${s.color.split(" ")[0].replace("border-", "bg-")}/30 ring-[3px] ring-inset ${s.color
-                      .split(" ")[0]
-                      .replace("border-", "ring-")}`
-                  : "bg-white"
-              }`}
+                  ? // Plný sytý podklad V BARVĚ karty + bílý text, stejný vzor jako
+                    // aktivní stav tlačítka "Nutno doplnit data" níž (border-status-missing
+                    // bg-status-missing text-white) – appka barvy definuje přes sdílené
+                    // tokeny v app/globals.css, takže "bg-<token>" existuje pro každou
+                    // stejně jako "border-<token>" (odvozeno z s.color.split(" ")[0]).
+                    `border-transparent ${s.color.split(" ")[0].replace("border-", "bg-")}`
+                  : `bg-white ${s.color.split(" ")[0]}`
+              } ${clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"}`}
             >
-              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
+              <div
+                className={`text-[11px] font-bold uppercase tracking-wide ${
+                  isActive ? "text-white/80" : "text-gray-500"
+                }`}
+              >
                 {s.label}
               </div>
-              <div className={`mt-1.5 text-[28px] font-bold ${s.color.split(" ")[1]}`}>
+              <div
+                className={`mt-1.5 text-[28px] font-bold ${isActive ? "text-white" : s.color.split(" ")[1]}`}
+              >
                 {s.value}
               </div>
-              <div className="mt-0.5 text-[11px] text-gray-400">{s.note}</div>
+              <div className={`mt-0.5 text-[11px] ${isActive ? "text-white/70" : "text-gray-400"}`}>
+                {s.note}
+              </div>
             </button>
           );
         })}
