@@ -631,11 +631,11 @@ function DashboardOverview() {
               } ${
                 isActive
                   ? // Výraznější vybraný stav než tenký prstenec kolem karty – vlastní
-                    // sytější podklad a silnější prstenec V BARVĚ karty (stejný název
-                    // odstínu jako "border-X" výš, jen "ring-X" – appka barvy definuje
-                    // přes sdílené tokeny v app/globals.css, takže "ring-<token>" i
-                    // "bg-<token>/15" existují pro každou z nich stejně jako "border-<token>").
-                    `${s.color.split(" ")[0].replace("border-", "bg-")}/15 ring-2 ring-inset ${s.color
+                    // sytější podklad a silnější (3px) prstenec V BARVĚ karty (stejný
+                    // název odstínu jako "border-X" výš, jen "ring-X"/"bg-X" – appka
+                    // barvy definuje přes sdílené tokeny v app/globals.css, takže
+                    // existují pro každou z nich stejně jako "border-<token>").
+                    `${s.color.split(" ")[0].replace("border-", "bg-")}/30 ring-[3px] ring-inset ${s.color
                       .split(" ")[0]
                       .replace("border-", "ring-")}`
                   : "bg-white"
