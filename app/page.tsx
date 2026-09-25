@@ -715,7 +715,7 @@ function DashboardOverview() {
               title="Zobrazit jen zařízení bez spárované aktuální revizní zprávy"
               className={`px-3 py-2 transition-colors ${
                 filter === "bez_zpravy"
-                  ? "bg-status-missing text-white"
+                  ? "bg-red-600 text-white"
                   : "bg-red-50 text-red-700 hover:bg-red-100"
               }`}
             >
@@ -785,7 +785,7 @@ function DashboardOverview() {
               title="Zobrazit jen zařízení bez ceny v ceníku"
               className={`px-3 py-2 transition-colors ${
                 filter === "bez_ceny"
-                  ? "bg-status-missing text-white"
+                  ? "bg-red-600 text-white"
                   : "bg-red-50 text-red-700 hover:bg-red-100"
               }`}
             >
