@@ -633,11 +633,14 @@ function DashboardOverview() {
                     // bg-status-missing text-white) – appka barvy definuje přes sdílené
                     // tokeny v app/globals.css, takže "bg-<token>" existuje pro každou
                     // stejně jako "border-<token>" (odvozeno z s.color.split(" ")[0]).
-                    // Silný stín + nadzvednutí + zvětšení navíc dají kartě dojem, že
-                    // výrazně "vystoupí" nad ostatní (3D efekt), ne jen že změnila
-                    // barvu. "relative z-10", ať zvětšená/nadzvednutá karta vizuálně
-                    // překryje sousední karty v gridu, ne naopak.
-                    `relative z-10 border-transparent shadow-2xl -translate-y-1.5 scale-[1.08] ${s.color
+                    // Silný stín (+ barevná záře v barvě karty) + výraznější
+                    // nadzvednutí/naklonění/zvětšení dají kartě jasný 3D dojem, že
+                    // vystoupí nad ostatní, ne jen že změnila barvu. "relative z-10",
+                    // ať zvětšená/nadzvednutá karta vizuálně překryje sousední karty
+                    // v gridu, ne naopak.
+                    `relative z-10 border-transparent shadow-2xl ${s.color
+                      .split(" ")[0]
+                      .replace("border-", "shadow-")}/50 -translate-y-3 -rotate-1 scale-[1.15] ${s.color
                       .split(" ")[0]
                       .replace("border-", "bg-")}`
                   : `bg-white shadow-sm ${s.color.split(" ")[0]}`
