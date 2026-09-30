@@ -391,6 +391,7 @@ type ActiveFilter =
   | "vysledek_ok"
   | "vysledek_nok"
   | "vysledek_ke_kontrole"
+  | "nok_opraveno"
   | "bez_ceny"
   | "s_cenou";
 
@@ -404,6 +405,7 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   vysledek_ok: "Výsledek revize: OK",
   vysledek_nok: "Výsledek revize: NOK",
   vysledek_ke_kontrole: "Výsledek revize: Ke kontrole",
+  nok_opraveno: "NOK opraveno",
   bez_ceny: "Bez ceny",
   s_cenou: "S cenou",
 };
@@ -889,6 +891,9 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
   const pocetVysledekKeKontrole = data
     ? data.rows.filter((row) => efektivniVysledekRevize(row) === "KE_KONTROLE").length
     : 0;
+  const pocetNokOpraveno = data
+    ? data.rows.filter((row) => row.vysledekRevize === "NOK" && !!row.opravaPoznamka).length
+    : 0;
 
   const pocetSCenou = data ? data.rows.filter((row) => row.cena !== null).length : 0;
   const pocetBezCeny = data ? data.rows.length - pocetSCenou : 0;
@@ -1152,6 +1157,17 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
               >
                 Ke kontrole ({pocetVysledekKeKontrole})
               </button>
+              <button
+                onClick={() => setFilter("nok_opraveno")}
+                title="Zobrazit jen NOK zařízení s ručně zaznamenanou opravou"
+                className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                  filter === "nok_opraveno"
+                    ? "bg-blue-600 text-white"
+                    : "bg-blue-50 text-blue-700 hover:bg-blue-100"
+                }`}
+              >
+                NOK opraveno ({pocetNokOpraveno})
+              </button>
             </div>
           </div>
         )}
@@ -1207,6 +1223,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                 if (filter === "vysledek_ok") return efektivniVysledekRevize(row) === "OK";
                 if (filter === "vysledek_nok") return efektivniVysledekRevize(row) === "NOK";
                 if (filter === "vysledek_ke_kontrole") return efektivniVysledekRevize(row) === "KE_KONTROLE";
+                if (filter === "nok_opraveno") return row.vysledekRevize === "NOK" && !!row.opravaPoznamka;
                 if (filter === "bez_ceny") return row.cena === null;
                 if (filter === "s_cenou") return row.cena !== null;
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
