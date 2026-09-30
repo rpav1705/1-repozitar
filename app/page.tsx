@@ -13,6 +13,7 @@ import {
   Timestamp,
   where,
 } from "firebase/firestore";
+import * as XLSX from "xlsx";
 import { RevizniZpravyImportZdroj } from "@/lib/importLog";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
@@ -174,6 +175,57 @@ function describeActiveFilter(filter: ActiveFilter, search: string): string | nu
   if (filter !== "all") parts.push(FILTER_LABELS[filter]);
   if (search) parts.push(`hledání „${search}“`);
   return parts.length > 0 ? parts.join(" + ") : null;
+}
+
+/** Krátký, souborový (bez diakritiky/mezer/velkých písmen) tvar textu – pro název exportovaného souboru. */
+function slugify(text: string): string {
+  return normalizeSearchText(text)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Exportuje řádky do .xlsx souboru se stejnými sloupci, jaké appka ukazuje
+ * v tabulce "Přehled zařízení". Appka exportuje přesně tu sadu řádků, kterou
+ * jí zavolající předá (viz volání u tlačítka "Export do Excelu" –
+ * visibleRows PO filtru i hledání), ne celou databázi znovu dotazem, ať
+ * export vždycky odpovídá tomu, co uživatel na obrazovce právě vidí.
+ */
+function exportujDoExcelu(
+  rows: PlanRow[],
+  startOfToday: Date,
+  warnUntil: Date,
+  filter: ActiveFilter,
+  search: string
+) {
+  const data = rows.map((row) => {
+    const status = computeStatus(row.termin, startOfToday, warnUntil);
+    return {
+      "Číslo zařízení": row.cislo_zarizeni,
+      Popis: row.popis,
+      Cena: row.cena ?? "",
+      "Revize platná do": row.termin
+        ? row.termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "chybí termín",
+      "Provedeno dne": row.datumProvedeni
+        ? row.datumProvedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "",
+      "Revizi provedl": row.technikJmeno ?? "",
+      "Číslo oprávnění": row.technikCisloOpravneni ?? "",
+      "Výsledek revize": row.vysledekRevize ? VYSLEDEK_REVIZE_META[row.vysledekRevize].label : "",
+      "Zjištěná závada": row.zjistenaZavada ?? "",
+      Stav: STATUS_META[status].label,
+    };
+  });
+
+  const sheet = XLSX.utils.json_to_sheet(data);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, "Přehled");
+
+  const nazevFiltru = filter === "all" ? "vsechny-zaznamy" : slugify(FILTER_LABELS[filter]);
+  const nazevHledani = search ? `-hledani-${slugify(search)}` : "";
+  const datum = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `revize-${nazevFiltru}${nazevHledani}-${datum}.xlsx`);
 }
 
 type DashboardStats = {
@@ -853,9 +905,23 @@ function DashboardOverview() {
           <div className="overflow-hidden rounded-lg bg-white shadow-sm">
             <div className="flex items-center justify-between bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
               <span>Přehled zařízení</span>
-              <span className="text-[12px] font-normal text-white/60">
-                {data ? `${visibleRows.length} záznamů` : loading ? "Načítám…" : "0 záznamů"}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-[12px] font-normal text-white/60">
+                  {data ? `${visibleRows.length} záznamů` : loading ? "Načítám…" : "0 záznamů"}
+                </span>
+                {data && visibleRows.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      exportujDoExcelu(visibleRows, startOfToday, warnUntil, filter, trimmedSearch)
+                    }
+                    title="Exportovat právě zobrazené záznamy (podle aktivního filtru a hledání) do Excelu"
+                    className="rounded-md border border-white/30 bg-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white transition-colors hover:bg-white/20"
+                  >
+                    Export do Excelu
+                  </button>
+                )}
+              </div>
             </div>
 
             {data && activeDescription && (
