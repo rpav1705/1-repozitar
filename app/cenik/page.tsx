@@ -214,7 +214,7 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
   return (
     <div className="overflow-hidden rounded-lg bg-white shadow-sm">
       <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
-        Import ceníku z cenové nabídky (PDF / XLS)
+        Import ceníku z cenové nabídky (PDF / XLS / XLSX)
       </div>
       <div className="flex flex-col gap-4 px-[18px] py-5">
         <p className="text-[12.5px] text-gray-500">
@@ -228,7 +228,7 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
-            label="Vybrat soubory (.pdf / .xls nabídky)"
+            label="Vybrat soubory (.pdf / .xls / .xlsx nabídky)"
             onChange={(fileList) => {
               setFiles(Array.from(fileList ?? []));
               setPripraveno([]);

@@ -385,7 +385,7 @@ function PlanUpload() {
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
-            label="Vybrat soubor (.xls Maximo)"
+            label="Vybrat soubor (.xls / .xlsx Maximo)"
             accept=".xls,.xlsx"
             onChange={(fileList) => {
               setFile(fileList?.[0] ?? null);
