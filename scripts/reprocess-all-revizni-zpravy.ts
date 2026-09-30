@@ -437,6 +437,14 @@ async function synchronizujPlanovanouReviziAdmin(
     predchozi_revizni_zprava_url: predchozi ? (predchozi.snap.data().pdf_url ?? null) : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
+    // Viz stejný komentář u synchronizujPlanovanouRevizi v
+    // lib/revizniZpravyHistorie.ts – ruční poznámka o opravě patří ke
+    // KONKRÉTNÍ NOK zprávě, na kterou "posledni_revizni_zprava_id" dosud
+    // ukazovalo; při dosazení jiné (nové) zprávy by jinak u ní zůstala viset
+    // jako zavádějící "už opraveno".
+    ...(jeUzAktualni
+      ? {}
+      : { oprava_poznamka: null, oprava_datum: null, oprava_uzivatel_email: null }),
   });
 
   return true;

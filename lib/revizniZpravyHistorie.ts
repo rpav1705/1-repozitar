@@ -236,6 +236,16 @@ async function synchronizujPlanovanouRevizi(
     predchozi_revizni_zprava_url: predchozi ? predchozi.snap.data().pdf_url ?? null : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
+    // Ruční poznámka o opravě (viz app/page.tsx – VysledekReviseBadge) patří k
+    // KONKRÉTNÍ NOK zprávě, na kterou "posledni_revizni_zprava_id" dosud
+    // ukazovalo. Když teď dosazujeme jinou (novou) zprávu, stará oprava by u
+    // téhle nové (klidně zase NOK) zprávy zůstala viset jako zavádějící "už
+    // opraveno" – appka ji proto zároveň smaže. Beze změny (jeUzAktualni)
+    // necháváme oprava_* pole tak, jak jsou, ať appka nesmaže platnou opravu
+    // jen kvůli tomu, že se přepočítala historie.
+    ...(jeUzAktualni
+      ? {}
+      : { oprava_poznamka: null, oprava_datum: null, oprava_uzivatel_email: null }),
   });
 
   return true;

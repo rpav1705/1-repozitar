@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   collection,
+  doc,
   DocumentData,
   getCountFromServer,
   getDocs,
@@ -11,6 +12,7 @@ import {
   query,
   QueryDocumentSnapshot,
   Timestamp,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import * as XLSX from "xlsx";
@@ -58,7 +60,30 @@ type PlanRow = {
   zjistenaZavada: string | null;
   /** Cena revize podle čísla zařízení z kolekce "cenik" (viz app/cenik/page.tsx), nebo null, pokud tam zařízení není. */
   cena: number | null;
+  /**
+   * Poznámka o ruční opravě NOK zprávy (viz VysledekReviseBadge) – appka
+   * díky ní zjištěnou závadu opravenou "na papíře" i v appce dál nepočítá
+   * jako otevřenou (efektivniVysledekRevize ji ukáže jako OK), ale pořád je
+   * vidět, že šlo PŮVODNĚ o NOK a kdy/proč se to změnilo. Null = zpráva
+   * nebyla (nebo už není, viz komentář u oprava_* v
+   * lib/revizniZpravyHistorie.ts) takhle ručně opravená.
+   */
+  opravaPoznamka: string | null;
+  opravaDatum: Date | null;
+  opravaUzivatelEmail: string | null;
 };
+
+/**
+ * Efektivní výsledek revize – NOK zpráva s poznámkou o ruční opravě (viz
+ * PlanRow.opravaPoznamka) se pro statistiky/filtrování/karty počítá jako OK
+ * (appka "zprávu mění na OK", jak appka od uživatele požaduje), samotný
+ * badge (VysledekReviseBadge) ale pořád zobrazí, že šlo PŮVODNĚ o NOK a kdy
+ * bylo opraveno – appka tak nikde tiše neschová, že k opravě došlo.
+ */
+function efektivniVysledekRevize(row: PlanRow): VysledekRevize | null {
+  if (row.vysledekRevize === "NOK" && row.opravaPoznamka) return "OK";
+  return row.vysledekRevize;
+}
 
 const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: string }> = {
   OK: { label: "OK", className: "border-status-ok text-status-ok bg-green-50" },
@@ -71,28 +96,80 @@ const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: s
  * na jeden řádek s "…", ať sloupec nerozbíjí šířku tabulky. Najetí myší
  * ukáže celý text (title), kliknutí ho rozbalí/sbalí přímo v buňce (pro
  * dotykové ovládání, kde title nefunguje).
+ *
+ * U NOK zprávy appka navíc nabídne "+ Zaznamenat opravu" – po zapsání
+ * poznámky (co bylo opraveno) appka zprávu ukazuje jako OK (viz
+ * efektivniVysledekRevize), ale badge PŘESTO dál zobrazuje původní NOK
+ * (jako druhý štítek "opraveno") i samotnou poznámku, takže je vidět, že ke
+ * změně došlo ručně po opravě, ne že by zpráva byla od začátku v pořádku.
  */
 function VysledekReviseBadge({
-  vysledek,
-  zavada,
+  row,
+  onOznacitOpravene,
 }: {
-  vysledek: VysledekRevize | null;
-  zavada: string | null;
+  row: PlanRow;
+  onOznacitOpravene: (poznamka: string) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [formOteviren, setFormOteviren] = useState(false);
+  const [poznamkaText, setPoznamkaText] = useState("");
+  const [ukladam, setUkladam] = useState(false);
+  const [chyba, setChyba] = useState("");
 
+  const vysledek = row.vysledekRevize;
   if (!vysledek) return <span className="text-gray-300">—</span>;
 
-  const meta = VYSLEDEK_REVIZE_META[vysledek];
+  const jeOpravene = vysledek === "NOK" && !!row.opravaPoznamka;
+  const zobrazenyVysledek = efektivniVysledekRevize(row) ?? vysledek;
+  const meta = VYSLEDEK_REVIZE_META[zobrazenyVysledek];
+  const zavada = row.zjistenaZavada;
   const zobrazitZavadu = vysledek !== "OK" && zavada;
+
+  const handleUlozitOpravu = async () => {
+    const trimmed = poznamkaText.trim();
+    if (!trimmed) {
+      setChyba("Napiš prosím poznámku o opravě.");
+      return;
+    }
+    setUkladam(true);
+    setChyba("");
+    try {
+      await onOznacitOpravene(trimmed);
+      setFormOteviren(false);
+      setPoznamkaText("");
+    } catch (err) {
+      setChyba(
+        err instanceof Error ? err.message : "Nepodařilo se uložit opravu. Zkus to prosím znovu."
+      );
+    } finally {
+      setUkladam(false);
+    }
+  };
 
   return (
     <div className="flex flex-col items-start gap-1">
-      <span
-        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
-      >
-        {meta.label}
-      </span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span
+          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
+        >
+          {meta.label}
+        </span>
+        {jeOpravene && (
+          <span
+            className="inline-flex items-center rounded-full border border-blue-300 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700"
+            title={
+              row.opravaDatum
+                ? `Původně NOK, opraveno ${row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}${
+                    row.opravaUzivatelEmail ? ` (${row.opravaUzivatelEmail})` : ""
+                  }`
+                : "Původně NOK, opraveno"
+            }
+          >
+            opraveno
+          </span>
+        )}
+      </div>
+
       {zobrazitZavadu && (
         <button
           type="button"
@@ -104,6 +181,64 @@ function VysledekReviseBadge({
         >
           {zavada}
         </button>
+      )}
+
+      {jeOpravene && (
+        <p className="max-w-[220px] text-[11px] text-blue-700">
+          Oprava: {row.opravaPoznamka}
+          {row.opravaDatum && (
+            <span className="text-blue-400">
+              {" "}
+              ({row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })})
+            </span>
+          )}
+        </p>
+      )}
+
+      {vysledek === "NOK" && !jeOpravene && !formOteviren && (
+        <button
+          type="button"
+          onClick={() => setFormOteviren(true)}
+          className="text-[11px] font-semibold text-blue-600 hover:underline"
+        >
+          + Zaznamenat opravu
+        </button>
+      )}
+
+      {formOteviren && (
+        <div className="mt-1 flex w-56 flex-col gap-1.5 rounded-md border border-gray-200 bg-gray-50 p-2">
+          <textarea
+            value={poznamkaText}
+            onChange={(e) => setPoznamkaText(e.target.value)}
+            placeholder="Co bylo opraveno…"
+            rows={2}
+            autoFocus
+            className="w-full resize-none rounded border border-gray-300 px-2 py-1 text-[11px] outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {chyba && <p className="text-[10.5px] text-red-600">{chyba}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleUlozitOpravu}
+              disabled={ukladam}
+              className="rounded bg-status-ok px-2 py-1 text-[10.5px] font-semibold text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {ukladam ? "Ukládám…" : "Označit jako opravené (OK)"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFormOteviren(false);
+                setPoznamkaText("");
+                setChyba("");
+              }}
+              disabled={ukladam}
+              className="text-[10.5px] text-gray-500 hover:underline"
+            >
+              Zrušit
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -212,8 +347,16 @@ function exportujDoExcelu(
         : "",
       "Revizi provedl": row.technikJmeno ?? "",
       "Číslo oprávnění": row.technikCisloOpravneni ?? "",
+      // Záměrně PŮVODNÍ (ne efektivní) výsledek – export má sloužit i jako
+      // podklad k dohledání historie, ne jen aktuální stav (ten appka i tak
+      // dává najevo přes sloupce "Opraveno"/"Poznámka k opravě" níž).
       "Výsledek revize": row.vysledekRevize ? VYSLEDEK_REVIZE_META[row.vysledekRevize].label : "",
       "Zjištěná závada": row.zjistenaZavada ?? "",
+      Opraveno: row.vysledekRevize === "NOK" && row.opravaPoznamka ? "Ano" : "",
+      "Poznámka k opravě": row.opravaPoznamka ?? "",
+      "Datum opravy": row.opravaDatum
+        ? row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "",
       Stav: STATUS_META[status].label,
     };
   });
@@ -325,6 +468,10 @@ function useDashboardData() {
               typeof record.cislo_zarizeni === "string"
                 ? cenyPodleZarizeni.get(record.cislo_zarizeni) ?? null
                 : null,
+            opravaPoznamka: typeof record.oprava_poznamka === "string" ? record.oprava_poznamka : null,
+            opravaDatum: record.oprava_datum instanceof Timestamp ? record.oprava_datum.toDate() : null,
+            opravaUzivatelEmail:
+              typeof record.oprava_uzivatel_email === "string" ? record.oprava_uzivatel_email : null,
           };
         });
 
@@ -356,7 +503,7 @@ function useDashboardData() {
     };
   }, []);
 
-  return { data, error, loading };
+  return { data, error, loading, setData };
 }
 
 const IMPORT_LOG_COLLECTION = "import_log";
@@ -593,8 +740,8 @@ function ImportLogCard({
   );
 }
 
-function DashboardOverview() {
-  const { data, error, loading } = useDashboardData();
+function DashboardOverview({ userEmail }: { userEmail: string }) {
+  const { data, error, loading, setData } = useDashboardData();
   const { data: importLogs, loading: importLogsLoading } = useImportLogs();
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
@@ -618,18 +765,48 @@ function DashboardOverview() {
   // Stejně jako u ostatních karet počítáno z už načtených řádků – vysledekRevize
   // je null u zařízení bez PDF nebo u starších dat bez zpětného doplnění, taková
   // se do žádné z těchto tří karet nezapočítávají (OK+NOK+KE_KONTROLE <= počet řádků).
+  // Počítá se EFEKTIVNÍ výsledek (viz efektivniVysledekRevize) – ručně opravená
+  // NOK zpráva se tak řadí do "OK", appka ji ale i tak dál zobrazuje s viditelnou
+  // stopou opravy (viz VysledekReviseBadge), jen ji nepočítá jako otevřený problém.
   const pocetVysledekOk = data
-    ? data.rows.filter((row) => row.vysledekRevize === "OK").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "OK").length
     : 0;
   const pocetVysledekNok = data
-    ? data.rows.filter((row) => row.vysledekRevize === "NOK").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "NOK").length
     : 0;
   const pocetVysledekKeKontrole = data
-    ? data.rows.filter((row) => row.vysledekRevize === "KE_KONTROLE").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "KE_KONTROLE").length
     : 0;
 
   const pocetSCenou = data ? data.rows.filter((row) => row.cena !== null).length : 0;
   const pocetBezCeny = data ? data.rows.length - pocetSCenou : 0;
+
+  /**
+   * Zapíše poznámku o ruční opravě NOK zprávy (viz VysledekReviseBadge) do
+   * "planovane_revize" a hned aktualizuje i lokální stav (setData) – appka
+   * díky tomu po uložení nemusí kvůli jedné opravené položce znovu stahovat
+   * a přepočítávat celý (tisíce řádků velký) přehled.
+   */
+  const oznacitOpraveno = async (rowId: string, poznamka: string) => {
+    const opravaDatum = new Date();
+    await updateDoc(doc(db, PLAN_COLLECTION, rowId), {
+      oprava_poznamka: poznamka,
+      oprava_datum: Timestamp.fromDate(opravaDatum),
+      oprava_uzivatel_email: userEmail,
+    });
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            rows: prev.rows.map((row) =>
+              row.id === rowId
+                ? { ...row, opravaPoznamka: poznamka, opravaDatum, opravaUzivatelEmail: userEmail }
+                : row
+            ),
+          }
+        : prev
+    );
+  };
 
   const stats: {
     label: string;
@@ -886,9 +1063,9 @@ function DashboardOverview() {
                 if (filter === "all") return true;
                 if (filter === "bez_zpravy") return row.posledniRevizniZpravaUrl === null;
                 if (filter === "s_zpravou") return row.posledniRevizniZpravaUrl !== null;
-                if (filter === "vysledek_ok") return row.vysledekRevize === "OK";
-                if (filter === "vysledek_nok") return row.vysledekRevize === "NOK";
-                if (filter === "vysledek_ke_kontrole") return row.vysledekRevize === "KE_KONTROLE";
+                if (filter === "vysledek_ok") return efektivniVysledekRevize(row) === "OK";
+                if (filter === "vysledek_nok") return efektivniVysledekRevize(row) === "NOK";
+                if (filter === "vysledek_ke_kontrole") return efektivniVysledekRevize(row) === "KE_KONTROLE";
                 if (filter === "bez_ceny") return row.cena === null;
                 if (filter === "s_cenou") return row.cena !== null;
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
@@ -1006,7 +1183,10 @@ function DashboardOverview() {
                           <td className="py-2 pr-4">{row.technikJmeno || "—"}</td>
                           <td className="py-2 pr-4">{row.technikCisloOpravneni || "—"}</td>
                           <td className="py-2 pr-4">
-                            <VysledekReviseBadge vysledek={row.vysledekRevize} zavada={row.zjistenaZavada} />
+                            <VysledekReviseBadge
+                              row={row}
+                              onOznacitOpravene={(poznamka) => oznacitOpraveno(row.id, poznamka)}
+                            />
                           </td>
                           <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>
                             {meta.label}
@@ -1096,7 +1276,7 @@ export default function Home() {
               Vítej, {user.email}!
             </div>
 
-            <DashboardOverview />
+            <DashboardOverview userEmail={user.email ?? "neznámý uživatel"} />
           </div>
         </div>
       )}
