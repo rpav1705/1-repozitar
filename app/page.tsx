@@ -11,6 +11,7 @@ import {
   orderBy,
   query,
   QueryDocumentSnapshot,
+  setDoc,
   Timestamp,
   updateDoc,
   where,
@@ -24,6 +25,7 @@ import { db } from "@/lib/firebase";
 import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
+import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
 
 const PLAN_COLLECTION = "planovane_revize";
 const CENIK_COLLECTION = "cenik";
@@ -241,6 +243,116 @@ function VysledekReviseBadge({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Buňka s cenou – u zařízení bez ceny (viz filtr "Bez ceny") appka místo "—"
+ * nabídne rovnou v tabulce "+ Doplnit cenu", ať uživatel nemusí kvůli
+ * jedné chybějící ceně chodit na stránku Ceník. Uložená cena jde stejnou
+ * cestou i znovu upravit (tužka vedle částky).
+ */
+function CenaBunka({
+  row,
+  onUlozitCenu,
+}: {
+  row: PlanRow;
+  onUlozitCenu: (cena: number) => Promise<void>;
+}) {
+  const [editace, setEditace] = useState(false);
+  const [hodnota, setHodnota] = useState("");
+  const [ukladam, setUkladam] = useState(false);
+  const [chyba, setChyba] = useState("");
+
+  const zahajitEditaci = () => {
+    setHodnota(row.cena !== null ? String(row.cena) : "");
+    setChyba("");
+    setEditace(true);
+  };
+
+  const handleUlozit = async () => {
+    const cena = Number(hodnota.replace(",", "."));
+    if (!hodnota.trim() || Number.isNaN(cena) || cena < 0) {
+      setChyba("Zadej platnou cenu.");
+      return;
+    }
+    setUkladam(true);
+    setChyba("");
+    try {
+      await onUlozitCenu(cena);
+      setEditace(false);
+    } catch (err) {
+      setChyba(
+        err instanceof Error ? err.message : "Nepodařilo se uložit cenu. Zkus to prosím znovu."
+      );
+    } finally {
+      setUkladam(false);
+    }
+  };
+
+  if (editace) {
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={hodnota}
+            onChange={(e) => setHodnota(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleUlozit();
+              if (e.key === "Escape") setEditace(false);
+            }}
+            autoFocus
+            className="w-20 rounded border border-gray-300 px-1.5 py-0.5 text-[11px] outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          <button
+            type="button"
+            onClick={handleUlozit}
+            disabled={ukladam}
+            className="text-[10.5px] font-semibold text-status-ok hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {ukladam ? "Ukládám…" : "Uložit"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditace(false)}
+            disabled={ukladam}
+            className="text-[10.5px] text-gray-500 hover:underline"
+          >
+            Zrušit
+          </button>
+        </div>
+        {chyba && <p className="text-[10.5px] text-red-600">{chyba}</p>}
+      </div>
+    );
+  }
+
+  if (row.cena !== null) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span>{formatCena(row.cena)}</span>
+        <button
+          type="button"
+          onClick={zahajitEditaci}
+          title="Upravit cenu"
+          className="text-[10px] text-gray-300 hover:text-blue-600"
+        >
+          ✎
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={zahajitEditaci}
+      className="text-[11px] font-semibold text-blue-600 hover:underline"
+    >
+      + Doplnit cenu
+    </button>
   );
 }
 
@@ -808,6 +920,35 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
     );
   };
 
+  /**
+   * Zapíše/upraví cenu zařízení přímo z přehledu (viz CenaBunka) – zapisuje
+   * do STEJNÉ kolekce "cenik" jako import na stránce Ceník (spárováno podle
+   * čísla zařízení, viz useDashboardData výše), takže ruční cena appce funguje
+   * stejně jako cena z nahrané nabídky a případný pozdější import nabídky ji
+   * podle svých pravidel (viz app/cenik/page.tsx) klidně přepíše.
+   */
+  const ulozitCenu = async (row: PlanRow, cena: number) => {
+    const id = sanitizeDocId(row.cislo_zarizeni);
+    if (!id) {
+      throw new Error("Zařízení nemá platné číslo, cenu nelze uložit.");
+    }
+    await setDoc(
+      doc(db, CENIK_COLLECTION, id),
+      {
+        cislo_zarizeni: row.cislo_zarizeni,
+        popis: row.popis,
+        cena,
+        nahrano: Timestamp.fromDate(new Date()),
+      },
+      { merge: true }
+    );
+    setData((prev) =>
+      prev
+        ? { ...prev, rows: prev.rows.map((r) => (r.id === row.id ? { ...r, cena } : r)) }
+        : prev
+    );
+  };
+
   const stats: {
     label: string;
     value: string;
@@ -1161,11 +1302,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                           <td className="py-2 pl-[14px] pr-4">{row.cislo_zarizeni}</td>
                           <td className="py-2 pr-4">{row.popis}</td>
                           <td className="py-2 pr-4">
-                            {row.cena !== null ? (
-                              formatCena(row.cena)
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
+                            <CenaBunka row={row} onUlozitCenu={(cena) => ulozitCenu(row, cena)} />
                           </td>
                           <td className="py-2 pr-4">
                             {row.termin ? (
