@@ -557,16 +557,37 @@ function findFuzzyValueAfterLabel(lines: string[], label: string): string | null
 }
 
 /**
- * "Revize ev. č. DATAPLC01-2026" – appka jako číslo zařízení bere kód PŘED
- * koncovou pomlčkou a rokem (ten se mění revizi od revize, samotné zařízení
- * ne). Zachycená hodnota se před tím zbaví VŠECH mezer (viz komentář u
- * šablony C výš – appka ji jinak nespáruje ani s obyčejnou pomlčkou v kódu,
- * natož s rokem na konci). Bez rozpoznaného roku (neobvyklý formát
- * evidenčního čísla) se použije celý zachycený kód beze změny, ať appka
- * radši zkusí spárovat s plánem "syrový" kód než revizní zprávu rovnou
- * přeskočit.
+ * "14, Výsledky měření | název rozv : AGV P06  typ: xx  v.č.: xx …" – appka
+ * bere hodnotu ZA popiskem "název rozv:" AŽ PO popisek "typ:" ze sousedního
+ * sloupce na stejném řádku (stejný princip jako u šablony D, viz komentář
+ * tam). PŘEDNOSTNÍ zdroj čísla zařízení (viz extractCisloZarizeniZarizeni
+ * níž) – na reálné zprávě appka zjistila, že "Revize ev. č." NENÍ vždycky
+ * číslo zařízení.
+ */
+function extractNazevRozvadeceZarizeni(lines: string[]): string | null {
+  const raw = findFuzzyValueAfterLabel(lines, "název rozv:");
+  if (!raw) return null;
+  const dalsiPopisekIdx = raw.search(/typ\s*:/i);
+  const hodnota = (dalsiPopisekIdx === -1 ? raw : raw.slice(0, dalsiPopisekIdx)).trim();
+  return hodnota ? hodnota.replace(/\s+/g, "") : null;
+}
+
+/**
+ * Číslo zařízení appka přednostně bere z "název rozv:" v sekci "14,
+ * Výsledky měření" (viz extractNazevRozvadeceZarizeni výš) – na reálné
+ * zprávě appka zjistila, že "Revize ev. č." NENÍ spolehlivý zdroj: u
+ * některých zpráv je to skutečně kód zařízení + rok ("Revize ev. č.
+ * DATAPLC01-2026"), ale u jiných je to NEZÁVISLÉ sekvenční číslo REVIZE bez
+ * vztahu ke konkrétnímu zařízení (např. "Revize ev. č. YFAI-R-16-2025" u
+ * zařízení AGVP06 – appka by z něj po odseknutí roku vytáhla nesmyslné
+ * "YFAI-R-16"). Zálohou zůstává PŮVODNÍ postup přes "Revize ev. č." (kód
+ * PŘED koncovou pomlčkou a rokem, ten se mění revizi od revize) pro případ,
+ * že by "název rozv:" na nějaké zprávě chyběl.
  */
 function extractCisloZarizeniZarizeni(lines: string[]): string | null {
+  const zNazvuRozvadece = extractNazevRozvadeceZarizeni(lines);
+  if (zNazvuRozvadece) return zNazvuRozvadece;
+
   const raw = findFuzzyValueAfterLabel(lines, "Revize ev. č.");
   if (!raw) return null;
   const cislo = raw.replace(/\s+/g, "");
@@ -678,11 +699,16 @@ function extractVysledekZavadZarizeni(
  * nepřimíchají do obsahu sekce "13, ZÁVADY" (ta by jinak u vícestránkového
  * spojení mohla sahat až přes hranici stránky, protože číslované body 5–13
  * jsou celé na stránce 2, ale "14, Výsledky měření" už začíná na stránce 3
- * ZA touhle opakovanou hlavičkou).
+ * ZA touhle opakovanou hlavičkou). BEZ "č\." v regexu – appka na reálné
+ * zprávě jiného nadpisu téže šablony (ZPRÁVA O REVIZI ELEKTROINSTALACE)
+ * zjistila, že se tenhle znak umí ztratit/poškodit ("c. revize:" místo "č.
+ * revize:", na jiné stránce dokonce úplně bez něj) – appka se tak spoléhá
+ * jen na to, co se u týhle hlavičky NIKDY neliší: "Revizní technik:" na
+ * úplném začátku řádku a "revize:" někde za ním.
  */
 function jeOpakovanaHlavickaZarizeni(line: string): boolean {
   const t = line.trim();
-  return /^Revizní\s+technik:.*č\.\s*revize:/i.test(t) || /^Stránka\s+\d+\s+z\s+\d+$/i.test(t);
+  return /^Revizní\s+technik:.*revize\s*:/i.test(t) || /^Stránka\s+\d+\s+z\s+\d+$/i.test(t);
 }
 
 /** "Tato zpráva má:  3 strany" – kolik stránek PDF dohromady tvoří tuhle jednu revizní zprávu. */
@@ -901,7 +927,14 @@ function detectSablona(lines: string[]): Sablona | null {
   // "\w" jako ASCII-only ([A-Za-z0-9_]), takže hned za českým písmenem s
   // diakritikou (zařízen-Í) hranici slova vůbec nepozná a celý match by
   // tiše selhal.
-  if (new RegExp(fuzzy("zpráva o revizi elektrického zařízení"), "i").test(text)) {
+  // "ZPRÁVA O REVIZI ELEKTROINSTALACE" – další reálně ověřený nadpis STEJNÉ
+  // šablony C (číslované sekce "1, Předmět revize:" … "13, ZÁVADY:", "Revize
+  // ev. č.", "Tato zpráva má: N stran" – appka na ní jen navíc zjistila, že
+  // "Revize ev. č." nemusí být číslo zařízení, viz extractCisloZarizeniZarizeni).
+  if (
+    new RegExp(fuzzy("zpráva o revizi elektrického zařízení"), "i").test(text) ||
+    new RegExp(fuzzy("zpráva o revizi elektroinstalace"), "i").test(text)
+  ) {
     return "elektricke_zarizeni";
   }
   return null;
