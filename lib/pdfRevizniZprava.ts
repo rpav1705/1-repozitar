@@ -708,14 +708,189 @@ function extractZarizeniZprava(lines: string[]) {
 }
 
 // ---------------------------------------------------------------------------
+// Šablona D: druhá varianta "Zpráva o revizi elektrického zařízení" – STEJNÝ
+// nadpis jako šablona C, ale jiný generátor/formulář (jiné popisky, dvou-
+// sloupcové řádky "popisek: hodnota    popisek: hodnota" vedle sebe). Appka
+// ji rozliší podle popisku "Revidovaný objekt:", který šablona C nemá (viz
+// detectSablona), a musí se kontrolovat PŘED obecnou shodou na nadpis.
+//
+// Dvousloupcové řádky appce komplikují čtení: reconstructLines spojuje VŠECHNY
+// sousední textové kousky stejným "  " bez ohledu na to, jestli šlo o mezeru
+// uvnitř slova (poškozený font, viz šablona C) nebo o mezeru MEZI sloupci –
+// nejde je od sebe rozeznat jen podle počtu mezer. Extrakce hodnot za
+// popiskem (findFuzzyValueAfterLabel apod.) tím není dotčená (vždy vezme
+// všechno ZA popiskem do konce řádku, ať už tam je cokoli dalšího), ale
+// appka kvůli tomu nemůže spolehlivě určit, kde končí hodnota JEDNOHO
+// sloupce a začíná další – u čísla zařízení (viz extractCisloZarizeniObjekt
+// níž) se to řeší jinak, hledáním podle pomlčky.
+// ---------------------------------------------------------------------------
 
-type Sablona = "spotrebic" | "pracovni_stroj" | "elektricke_zarizeni";
+/**
+ * Číslo zařízení tu (na rozdíl od šablony C) není samostatné kódové pole,
+ * ale poslední slovo volného popisu u "Revidovaný objekt:" (na reálné
+ * zprávě: "...nabíjecí pro automaticky naváděné vozidlo – AGVN01") – appka
+ * proto vezme text za POSLEDNÍ pomlčkou (en dash) v okně pár řádků od
+ * popisku "Revidovaný objekt:" až po další známý popisek "Zdroj el.
+ * energie:" (ať se nechytí nesouvisející pomlčka jinde ve zprávě, např.
+ * "v.č. - xx – vývody" na další stránce). Mezery zachycené uvnitř kódu
+ * (stejná porucha fontu jako u šablony C, viz "AGV N01" v diagnostice) se
+ * odstraní stejně jako u ostatních kódových polí.
+ */
+function extractCisloZarizeniObjekt(lines: string[]): string | null {
+  const idx = lines.findIndex((l) => new RegExp(fuzzy("Revidovaný objekt:"), "i").test(l));
+  if (idx === -1) return null;
 
-/** Podle nadpisu na stránce pozná, kterou ze tří známých šablon použít. */
+  const dalsiPopisekIdx = lines.findIndex(
+    (l, i) => i > idx && new RegExp(fuzzy("Zdroj el. energie:"), "i").test(l)
+  );
+  const okno = lines.slice(idx, dalsiPopisekIdx === -1 ? idx + 8 : dalsiPopisekIdx).join(" ");
+
+  const posledniPomlckaIdx = okno.lastIndexOf("–");
+  if (posledniPomlckaIdx === -1) return null;
+
+  const cislo = okno
+    .slice(posledniPomlckaIdx + 1)
+    .replace(/\s+/g, "")
+    .replace(/[.,;]+$/, "");
+  return cislo || null;
+}
+
+/**
+ * "Ukončena dne: 24.8.2026" / "Zahájena dne: 24.8.2026" – appka jako datum
+ * provedení revize přednostně bere "Ukončena dne" (stejná přednost jako u
+ * šablony C mezi "Datum ukončení/zahájení revize"), se zálohou na "Zahájena
+ * dne", kdyby v konkrétní zprávě první pole chybělo.
+ */
+function extractDatumProvedeniObjekt(lines: string[]): Date | null {
+  const raw =
+    findFuzzyValueAfterLabel(lines, "Ukončena dne:") ??
+    findFuzzyValueAfterLabel(lines, "Zahájena dne:");
+  return raw ? parseFlexibleDate(raw.replace(/\s+/g, "")) : null;
+}
+
+/** "Doporučený termín další revize: 08/2027 dle vnitřního předpisu provozovatele." */
+function extractTerminObjekt(lines: string[]): Date | null {
+  const raw = findFuzzyValueAfterLabel(lines, "Doporučený termín další revize:");
+  return raw ? parseTerminHodnota(raw.replace(/\s+/g, "")) : null;
+}
+
+/**
+ * "Revizní technik: David Kadlec    revize: Yanfeng Czechia Automotive" –
+ * jméno je text ZA popiskem "Revizní technik:" AŽ PO popisek "revize:" ze
+ * sousedního sloupce na stejném řádku (viz komentář u šablony D výš), ne do
+ * konce celého řádku.
+ */
+function extractTechnikJmenoObjekt(lines: string[]): string | null {
+  const raw = findFuzzyValueAfterLabel(lines, "Revizní technik:");
+  if (!raw) return null;
+  const dalsiPopisekIdx = raw.search(/revize\s*:/i);
+  const jmeno = (dalsiPopisekIdx === -1 ? raw : raw.slice(0, dalsiPopisekIdx)).trim();
+  return jmeno || null;
+}
+
+/** "osv.č.: 2578/24/R-EZ-E1A,E1B" – evidenční číslo oprávnění technika. */
+function extractCisloOpravneniObjekt(lines: string[]): string | null {
+  const raw = findFuzzyValueAfterLabel(lines, "osv.č.:");
+  return raw ? raw.replace(/\s+/g, "") : null;
+}
+
+/**
+ * Výsledek revize se (stejně jako u šablony C) nedá poznat z "Závěr:" – to
+ * je vždycky stejná pozitivní úvodní věta bez ohledu na skutečný nález.
+ * Skutečný výsledek je v poli "Zjištěné závady:", které je tu (na rozdíl od
+ * číslovaného bodu "13, ZÁVADY" u šablony C) jen prostý popisek s hodnotou
+ * na řádku/řádcích pod ním, končící popiskem "Závěr:".
+ */
+function extractVysledekZavadObjekt(
+  lines: string[]
+): { vysledek_revize: VysledekRevize; zjistena_zavada: string | null } {
+  const idx = lines.findIndex((l) => new RegExp(fuzzy("Zjištěné závady:"), "i").test(l));
+  if (idx === -1) return { vysledek_revize: "KE_KONTROLE", zjistena_zavada: null };
+
+  const zaverIdx = lines.findIndex((l, i) => i > idx && new RegExp(fuzzy("Závěr:"), "i").test(l));
+  const obsahRadky = (zaverIdx === -1 ? lines.slice(idx + 1) : lines.slice(idx + 1, zaverIdx))
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const text = obsahRadky.join(" ").trim();
+
+  if (/^bez\s+zjevn[ýy]ch\s+z[áa]vad/i.test(text)) {
+    return { vysledek_revize: "OK", zjistena_zavada: null };
+  }
+  if (text.length > 0) {
+    return { vysledek_revize: "NOK", zjistena_zavada: text };
+  }
+  return { vysledek_revize: "KE_KONTROLE", zjistena_zavada: null };
+}
+
+/** "Závěr:" – celý odstavec prózy, jen pro zobrazení (klasifikace viz extractVysledekZavadObjekt). */
+function extractZaverObjekt(lines: string[]): string {
+  const idx = lines.findIndex((l) => new RegExp(fuzzy("Závěr:"), "i").test(l));
+  if (idx === -1) return "";
+  return lines[idx + 1]?.trim() ?? "";
+}
+
+/**
+ * "Tato zpráva o revizi má  3 strany" – kolik stránek PDF dohromady tvoří
+ * tuhle jednu revizní zprávu (jiná formulace i chybějící dvojtečka oproti
+ * šabloně C, viz extractPocetStranZarizeni – appka proto hledá jen podle
+ * popisku "Tato zpráva o revizi má" a číslo bere jako první číslici za ním).
+ */
+function extractPocetStranObjekt(lines: string[]): number | null {
+  const raw = findFuzzyValueAfterLabel(lines, "Tato zpráva o revizi má");
+  if (!raw) return null;
+  const match = raw.match(/\d+/);
+  if (!match) return null;
+  const n = Number(match[0]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Druhá a další stránka téhle šablony opakuje v záhlaví jméno technika a
+ * název revidovaného objektu ("Revizní technik: David Kadlec  revize:
+ * Yanfeng Czechia Automotive") – appka při spojování stránek (viz
+ * parseRevizniZpravyPdf) tenhle řádek odfiltruje, ať se nepřimíchá do
+ * obsahu žádné extrahované sekce. Druhý řádek hlavičky (adresa technika +
+ * popis objektu končící kódem zařízení) záměrně NEODFILTROVÁVÁ – neexistuje
+ * pro něj spolehlivý rozpoznávací vzor a jeho případné zachycení navíc
+ * appce nevadí (žádná extrakce z něj mimo cislo_zarizeni nečte).
+ */
+function jeOpakovanaHlavickaObjekt(line: string): boolean {
+  return /^Revizní\s+technik:.*revize\s*:/i.test(line.trim());
+}
+
+function extractObjektZprava(lines: string[]) {
+  const { vysledek_revize, zjistena_zavada } = extractVysledekZavadObjekt(lines);
+  return {
+    cislo_zarizeni: extractCisloZarizeniObjekt(lines),
+    datum_provedeni: extractDatumProvedeniObjekt(lines),
+    novy_termin: extractTerminObjekt(lines),
+    celkove_hodnoceni: extractZaverObjekt(lines),
+    vysledek_revize,
+    zjistena_zavada,
+    technik_jmeno: extractTechnikJmenoObjekt(lines),
+    technik_cislo_opravneni: extractCisloOpravneniObjekt(lines),
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+type Sablona = "spotrebic" | "pracovni_stroj" | "elektricke_zarizeni" | "elektricke_zarizeni_objekt";
+
+/**
+ * Podle nadpisu (a u posledních dvou šablon dalšího rozlišovacího popisku)
+ * pozná, kterou ze čtyř známých šablon použít. Šablony C a D mají úplně
+ * STEJNÝ nadpis "ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ" (jiný generátor
+ * zprávy, ne jiný typ revize) – appka je rozliší podle popisku "Revidovaný
+ * objekt:", který má jen šablona D, a tenhle test proto MUSÍ proběhnout
+ * PŘED obecnou shodou na nadpis, jinak by šablona D vždycky spadla pod C.
+ */
 function detectSablona(lines: string[]): Sablona | null {
   const text = lines.join("\n");
   if (/revizi elektrického zařízení pracovního stroje/.test(text)) return "pracovni_stroj";
   if (/revizi elektrického spotřebiče/.test(text)) return "spotrebic";
+  if (new RegExp(fuzzy("Revidovaný objekt:"), "i").test(text)) {
+    return "elektricke_zarizeni_objekt";
+  }
   // Case-insensitive, fuzzy (viz fuzzy() výš) a samostatně (na rozdíl od
   // šablon výš) – nadpis "ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ" je na
   // reálné zprávě celý velkými písmeny a appka u týhle šablony obecně nesmí
@@ -737,15 +912,15 @@ function detectSablona(lines: string[]): Sablona | null {
  * pracovní stroj) mají vždycky jednu zprávu na JEDNU stránku – appka je tak
  * prochází stránku po stránce (jeden nahraný soubor může obsahovat revizní
  * zprávy pro víc zařízení, jednu na stránku). Šablona C (obecné elektrické
- * zařízení) naopak zabírá VÍC stránek na jednu zprávu (viz komentář u ní
- * výš) – appka po jejím rozpoznání spojí řádky odpovídajícího počtu
- * následujících stránek (dle "Tato zpráva má: N stran") a pokračuje AŽ ZA
- * nimi, ať appka zbylé stránky téže zprávy znovu nezkoušela rozpoznat jako
- * samostatné (a nesprávně přeskočené) zprávy. Číslo zařízení a všechny
- * ostatní údaje se čtou výhradně z textového obsahu PDF, nikdy z názvu
- * souboru. Podporuje tři reálně ověřené šablony revizních zpráv (viz
- * detectSablona výše) a stránky neodpovídající žádné z nich přeskočí se
- * srozumitelným důvodem.
+ * zařízení) i šablona D (jiný generátor téhož typu zprávy, viz komentář u
+ * ní výš) naopak zabírají VÍC stránek na jednu zprávu – appka po jejich
+ * rozpoznání spojí řádky odpovídajícího počtu následujících stránek (dle
+ * počtu stran uvedeného na první z nich) a pokračuje AŽ ZA nimi, ať appka
+ * zbylé stránky téže zprávy znovu nezkoušela rozpoznat jako samostatné (a
+ * nesprávně přeskočené) zprávy. Číslo zařízení a všechny ostatní údaje se
+ * čtou výhradně z textového obsahu PDF, nikdy z názvu souboru. Podporuje
+ * čtyři reálně ověřené šablony revizních zpráv (viz detectSablona výše) a
+ * stránky neodpovídající žádné z nich přeskočí se srozumitelným důvodem.
  */
 export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRevizniZpravyResult> {
   await ensureWorker();
@@ -844,6 +1019,60 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
           preskoceno.push({
             stranka,
             duvod: "nepodařilo se rozpoznat termín příští revize (šablona: elektrické zařízení)",
+          });
+          stranka += pocetStran;
+          continue;
+        }
+
+        zpravy.push({
+          cislo_zarizeni: extracted.cislo_zarizeni,
+          datum_provedeni: extracted.datum_provedeni,
+          novy_termin: extracted.novy_termin,
+          celkove_hodnoceni: extracted.celkove_hodnoceni,
+          vysledek_revize: extracted.vysledek_revize,
+          zjistena_zavada: extracted.zjistena_zavada,
+          technik_jmeno: extracted.technik_jmeno,
+          technik_cislo_opravneni: extracted.technik_cislo_opravneni,
+          stranka,
+        });
+        stranka += pocetStran;
+        continue;
+      }
+
+      if (sablona === "elektricke_zarizeni_objekt") {
+        // Víc stránek jedné zprávy, stejný princip jako u šablony C výš.
+        const pocetStran = extractPocetStranObjekt(lines) ?? 1;
+        const vsechnyRadky = [...lines];
+        for (let i = 1; i < pocetStran && stranka + i <= doc.numPages; i++) {
+          const dalsiPage = await doc.getPage(stranka + i);
+          const dalsiContent = await dalsiPage.getTextContent();
+          vsechnyRadky.push(
+            ...reconstructLines(dalsiContent.items).filter((l) => !jeOpakovanaHlavickaObjekt(l))
+          );
+        }
+
+        const extracted = extractObjektZprava(vsechnyRadky);
+
+        if (!extracted.cislo_zarizeni) {
+          preskoceno.push({
+            stranka,
+            duvod: "nepodařilo se najít číslo zařízení u Revidovaného objektu (šablona: elektrické zařízení D)",
+          });
+          stranka += pocetStran;
+          continue;
+        }
+        if (!extracted.datum_provedeni) {
+          preskoceno.push({
+            stranka,
+            duvod: "nepodařilo se najít datum provedení revize (šablona: elektrické zařízení D)",
+          });
+          stranka += pocetStran;
+          continue;
+        }
+        if (!extracted.novy_termin) {
+          preskoceno.push({
+            stranka,
+            duvod: "nepodařilo se rozpoznat termín příští revize (šablona: elektrické zařízení D)",
           });
           stranka += pocetStran;
           continue;
