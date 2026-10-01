@@ -76,20 +76,6 @@ function isFrequencyHeader(h: string): boolean {
 }
 
 /**
- * Skutečné kódy zařízení nikdy neobsahují mezeru (viz reálné příklady v
- * appce – "CHE012", "DATAPLC01", "EUSAXX5353" apod.) – appka holý text ze
- * sloupce jako poslední záchranu (viz cislo_zarizeni níž) použije JEN
- * pokud aspoň takhle vypadá, ať omylem nepoužije volný popisný text (appka
- * na reálném exportu narazila na řádek, kde "Původní aktivum" obsahovalo
- * místo kódu název úkolu "KONTROLA OLEJŮ") jako číslo zařízení.
- */
-function cleanRawEquipmentCode(text: string): string | null {
-  const trimmed = text.trim();
-  if (!trimmed || /\s/.test(trimmed)) return null;
-  return trimmed;
-}
-
-/**
  * Naparsuje export plánu revizí (sloupce podobné Maximo exportu) – ať už jde
  * o skutečný binární/OOXML sešit, nebo o HTML tabulku uloženou s příponou .xls.
  * Sloupce se mapují podle POŘADÍ (indexu), ne podle názvu hlavičky – hlavička
@@ -147,22 +133,12 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
 
     // V tomto exportu drží skutečné (revizní zprávou ověřitelné) číslo
     // zařízení sloupec "Původní aktivum", ne "Aktivum" – ten obsahuje jiný
-    // interní kód. "Aktivum" proto appka zkouší až PO "Původní aktivum", ale
-    // POŘÁD přes extractEquipmentNumber (ne jako holý text) – appka na
-    // reálném exportu narazila na řádek, kde "Původní aktivum" omylem
-    // obsahovalo název úkolu ("KONTROLA OLEJŮ") místo kódu, zatímco
-    // "Aktivum" mělo platný kód ("EUSAXX5353"); bez tohohle kroku by appka
-    // vzala rovnou volný text z "Původní aktivum", i když ve stejném řádku
-    // byl k dispozici skutečný kód. Holý (neextrahovaný) text z obou
-    // sloupců zůstává úplně poslední záchranou, a jen pokud aspoň vypadá
-    // jako kód (viz cleanRawEquipmentCode – žádná mezera).
+    // interní kód. "Aktivum" proto slouží jen jako poslední záchranná
+    // hodnota, kdyby "Původní aktivum" v souboru chybělo.
     const cislo_zarizeni =
       extractEquipmentNumber(codeRaw) ??
       extractEquipmentNumber(puvodniRaw) ??
-      extractEquipmentNumber(aktivumRaw) ??
-      cleanRawEquipmentCode(puvodniRaw) ??
-      cleanRawEquipmentCode(aktivumRaw) ??
-      "";
+      (puvodniRaw || aktivumRaw || "");
 
     const termin = parseFlexibleDate(row[dateIndex]);
     const popis = cellText(row[assetDescIndex ?? fallbackDescIndex]) || codeRaw;
