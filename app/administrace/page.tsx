@@ -1,13 +1,105 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { User } from "firebase/auth";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
 import { useUserRole, Role } from "@/lib/useUserRole";
 
-function PridatUzivatele({ adminUser }: { adminUser: User }) {
+type RadekUzivatele = {
+  uid: string;
+  email: string;
+  role: Role;
+  vytvoreno: string;
+  posledniPrihlaseni: string | null;
+};
+
+const ROLE_LABELY: Record<Role, string> = { admin: "Admin", uzivatel: "Uživatel" };
+
+function formatDatum(iso: string | null): string {
+  if (!iso) return "–";
+  return new Date(iso).toLocaleString("cs-CZ", { dateStyle: "short", timeStyle: "short" });
+}
+
+function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey: number }) {
+  const [radky, setRadky] = useState<RadekUzivatele[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let zruseno = false;
+    setError("");
+    (async () => {
+      try {
+        const token = await adminUser.getIdToken();
+        const res = await fetch("/api/seznam-uzivatelu", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Načtení seznamu uživatelů se nepodařilo.");
+        if (!zruseno) setRadky(data.uzivatele);
+      } catch (err) {
+        if (!zruseno) setError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+    return () => {
+      zruseno = true;
+    };
+  }, [adminUser, reloadKey]);
+
+  return (
+    <div className="max-w-2xl rounded-lg bg-white p-6 shadow-sm">
+      <h2 className="text-[15px] font-bold text-navy">Uživatelé</h2>
+
+      {error && (
+        <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>
+      )}
+
+      {!error && radky === null && (
+        <p className="mt-3 text-sm text-gray-500">Načítání...</p>
+      )}
+
+      {radky && radky.length > 0 && (
+        <table className="mt-4 w-full text-left text-[12.5px]">
+          <thead>
+            <tr className="border-b border-gray-200 text-gray-500">
+              <th className="pb-2 font-semibold">E-mail</th>
+              <th className="pb-2 font-semibold">Role</th>
+              <th className="pb-2 font-semibold">Založen</th>
+              <th className="pb-2 font-semibold">Poslední přihlášení</th>
+            </tr>
+          </thead>
+          <tbody>
+            {radky.map((u) => (
+              <tr key={u.uid} className="border-b border-gray-100">
+                <td className="py-2 text-navy">{u.email}</td>
+                <td className="py-2">
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      u.role === "admin" ? "bg-orange-50 text-accent" : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    {ROLE_LABELY[u.role]}
+                  </span>
+                </td>
+                <td className="py-2 text-gray-500">{formatDatum(u.vytvoreno)}</td>
+                <td className="py-2 text-gray-500">{formatDatum(u.posledniPrihlaseni)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function PridatUzivatele({
+  adminUser,
+  onVytvoreno,
+}: {
+  adminUser: User;
+  onVytvoreno: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [heslo, setHeslo] = useState("");
   const [hesloPotvrzeni, setHesloPotvrzeni] = useState("");
@@ -46,6 +138,7 @@ function PridatUzivatele({ adminUser }: { adminUser: User }) {
       setHeslo("");
       setHesloPotvrzeni("");
       setNovaRole("uzivatel");
+      onVytvoreno();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -133,6 +226,7 @@ export default function Administrace() {
 
 function AdministraceObsah({ user }: { user: User }) {
   const { role, loading } = useUserRole(user);
+  const [reloadKey, setReloadKey] = useState(0);
 
   return (
     <div className="flex min-h-full flex-1 flex-col bg-[#eef1f5]">
@@ -143,7 +237,10 @@ function AdministraceObsah({ user }: { user: User }) {
         {loading ? (
           <p className="text-sm text-gray-500">Načítání...</p>
         ) : role === "admin" ? (
-          <PridatUzivatele adminUser={user} />
+          <>
+            <SeznamUzivatelu adminUser={user} reloadKey={reloadKey} />
+            <PridatUzivatele adminUser={user} onVytvoreno={() => setReloadKey((k) => k + 1)} />
+          </>
         ) : (
           <div className="max-w-md rounded-lg bg-white p-6 shadow-sm">
             <p className="text-[13px] text-gray-600">Tahle sekce je jen pro adminy.</p>
