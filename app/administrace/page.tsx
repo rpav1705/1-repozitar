@@ -26,6 +26,28 @@ function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey:
   const [radky, setRadky] = useState<RadekUzivatele[] | null>(null);
   const [error, setError] = useState("");
   const [ukladaSeEmail, setUkladaSeEmail] = useState<string | null>(null);
+  const [mazeSeUid, setMazeSeUid] = useState<string | null>(null);
+
+  const smazUzivatele = async (uid: string, email: string) => {
+    if (!window.confirm(`Opravdu smazat účet ${email}? Tahle akce je nevratná.`)) return;
+    setError("");
+    setMazeSeUid(uid);
+    try {
+      const token = await adminUser.getIdToken();
+      const res = await fetch("/api/smazat-uzivatele", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ uid, email }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Smazání účtu se nepodařilo.");
+      setRadky((r) => r?.filter((u) => u.uid !== uid) ?? r);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMazeSeUid(null);
+    }
+  };
 
   const zmenRoli = async (email: string, novaRole: Role) => {
     setError("");
@@ -90,6 +112,7 @@ function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey:
               <th className="pb-2 font-semibold">Role</th>
               <th className="pb-2 font-semibold">Založen</th>
               <th className="pb-2 font-semibold">Poslední přihlášení</th>
+              <th className="pb-2 font-semibold"></th>
             </tr>
           </thead>
           <tbody>
@@ -114,6 +137,17 @@ function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey:
                   </td>
                   <td className="py-2 text-gray-500">{formatDatum(u.vytvoreno)}</td>
                   <td className="py-2 text-gray-500">{formatDatum(u.posledniPrihlaseni)}</td>
+                  <td className="py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => smazUzivatele(u.uid, u.email)}
+                      disabled={jeToJa || mazeSeUid === u.uid}
+                      title={jeToJa ? "Nemůžeš smazat vlastní účet" : undefined}
+                      className="text-[11px] font-semibold text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                    >
+                      {mazeSeUid === u.uid ? "Mažu…" : "Smazat"}
+                    </button>
+                  </td>
                 </tr>
               );
             })}
