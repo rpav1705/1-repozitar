@@ -14,6 +14,8 @@ import {
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
+import { useAuth } from "@/lib/useAuth";
+import { useUserRole } from "@/lib/useUserRole";
 import { db } from "@/lib/firebase";
 import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
@@ -691,13 +693,15 @@ function MesicniNaklady({ cenikRows, cenikLoading }: { cenikRows: CenikRow[] | n
 export default function CenikPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const { rows: cenikRows, loading: cenikLoading, error: cenikError } = useCenik(reloadKey);
+  const { user } = useAuth();
+  const { role } = useUserRole(user);
 
   return (
     <AuthGate>
       {(user) => (
         <div className="flex min-h-full flex-1 flex-col bg-[#eef1f5]">
-          <AppHeader user={user} />
-          <AppNav />
+          <AppHeader user={user} role={role} />
+          <AppNav role={role} />
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <CenikUpload onUlozeno={() => setReloadKey((k) => k + 1)} />

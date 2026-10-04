@@ -2,8 +2,14 @@
 
 import { signOut, User } from "firebase/auth";
 import { auth } from "@/lib/firebase";
+import { Role } from "@/lib/useUserRole";
 
-export function AppHeader({ user }: { user: User }) {
+const ROLE_LABELS: Record<Role, string> = {
+  admin: "Admin",
+  uzivatel: "Uživatel",
+};
+
+export function AppHeader({ user, role }: { user: User; role?: Role }) {
   const handleLogout = async () => {
     await signOut(auth);
   };
@@ -32,7 +38,7 @@ export function AppHeader({ user }: { user: User }) {
       <div className="flex items-center gap-4">
         <div className="text-right">
           <div className="text-[13px] font-semibold leading-tight">{user.email}</div>
-          <div className="text-[11px] text-white/60">Uživatel</div>
+          <div className="text-[11px] text-white/60">{role ? ROLE_LABELS[role] : " "}</div>
         </div>
         <button
           onClick={handleLogout}

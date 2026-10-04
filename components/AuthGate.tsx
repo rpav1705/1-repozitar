@@ -2,13 +2,9 @@
 
 import { useState } from "react";
 import { useAuth } from "@/lib/useAuth";
-import {
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-} from "firebase/auth";
+import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { User } from "firebase/auth";
-import { vyzvednoutPrihlaseniZpravu } from "@/lib/prihlaseniZprava";
 
 export function AuthGate({
   children,
@@ -16,21 +12,15 @@ export function AuthGate({
   children: (user: User) => React.ReactNode;
 }) {
   const { user, loading } = useAuth();
-  const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [zprava] = useState(() => vyzvednoutPrihlaseniZpravu() ?? "");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     try {
-      if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
-      } else {
-        await createUserWithEmailAndPassword(auth, email, password);
-      }
+      await signInWithEmailAndPassword(auth, email, password);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -67,9 +57,6 @@ export function AuthGate({
           </div>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4 px-8 py-8">
-            {zprava && (
-              <p className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700">{zprava}</p>
-            )}
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold text-gray-700">E-mail</label>
               <input
@@ -101,16 +88,12 @@ export function AuthGate({
               type="submit"
               className="mt-1 rounded-md bg-accent py-2.5 text-sm font-bold tracking-wide text-white transition-colors hover:bg-orange-600"
             >
-              {isLogin ? "PŘIHLÁSIT SE" : "ZAREGISTROVAT SE"}
+              PŘIHLÁSIT SE
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsLogin(!isLogin)}
-              className="mt-1 text-center text-xs text-gray-500 hover:text-navy"
-            >
-              {isLogin ? "Nemáš účet? Zaregistruj se" : "Máš už účet? Přihlas se"}
-            </button>
+            <p className="mt-1 text-center text-xs text-gray-500">
+              Nemáš účet? Požádej admina, ať ti ho založí v sekci Administrace.
+            </p>
           </form>
         </div>
       </div>

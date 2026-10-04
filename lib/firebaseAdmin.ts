@@ -77,6 +77,10 @@ export function ziskejAdminFirestore(): Firestore {
   return getFirestore(ziskejAdminApp());
 }
 
+export function ziskejAdminAuth() {
+  return getAuth(ziskejAdminApp());
+}
+
 /**
  * Ověří Firebase Auth ID token poslaný z appky (hlavička "Authorization:
  * Bearer <token>") – appka nikde jinde na serveru neběží, takže tohle je
@@ -94,4 +98,24 @@ export async function overitIdToken(authorizationHeader: string | null): Promise
   }
   const dekodovany = await getAuth(ziskejAdminApp()).verifyIdToken(token);
   return dekodovany.email ?? dekodovany.uid;
+}
+
+/** Vyhozena, pokud je volající přihlášený, ale nemá roli "admin". */
+export class ChybiOpravneniAdmin extends Error {}
+
+/**
+ * Jako overitIdToken, navíc ověří v kolekci "uzivatele" (čteno přes Admin
+ * SDK, tj. nezávisle na Firestore security rules), že přihlášený uživatel
+ * má roli "admin" – používá app/api/vytvorit-uzivatele/route.ts, aby
+ * zakládání účtů nešlo obejít jen tím, že je někdo přihlášený. Vrátí e-mail
+ * admina při úspěchu.
+ */
+export async function overitAdmina(authorizationHeader: string | null): Promise<string> {
+  const email = await overitIdToken(authorizationHeader);
+  const snap = await ziskejAdminFirestore().collection("uzivatele").doc(email.toLowerCase()).get();
+  const role = snap.exists ? snap.data()?.role : null;
+  if (role !== "admin") {
+    throw new ChybiOpravneniAdmin(`Uživatel ${email} nemá roli admin.`);
+  }
+  return email;
 }

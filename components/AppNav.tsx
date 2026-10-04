@@ -2,20 +2,22 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Role } from "@/lib/useUserRole";
 
 const TABS = [
   { href: "/", label: "Přehled revizí" },
   { href: "/nahrat", label: "Import a kontrola" },
   { href: "/cenik", label: "Ceník" },
-  { href: "/administrace", label: "Administrace" },
+  { href: "/administrace", label: "Administrace", adminOnly: true },
 ];
 
-export function AppNav() {
+export function AppNav({ role }: { role?: Role }) {
   const pathname = usePathname();
+  const tabs = TABS.filter((tab) => !tab.adminOnly || role === "admin");
 
   return (
     <nav className="flex gap-1 border-b border-gray-200 bg-white px-7">
-      {TABS.map((tab) => {
+      {tabs.map((tab) => {
         const isActive = pathname === tab.href;
         return (
           <Link

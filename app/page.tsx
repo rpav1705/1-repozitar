@@ -17,6 +17,8 @@ import { RevizniZpravyImportZdroj } from "@/lib/importLog";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
+import { useAuth } from "@/lib/useAuth";
+import { useUserRole } from "@/lib/useUserRole";
 import { db } from "@/lib/firebase";
 import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
@@ -999,12 +1001,15 @@ function DashboardOverview() {
 }
 
 export default function Home() {
+  const { user } = useAuth();
+  const { role } = useUserRole(user);
+
   return (
     <AuthGate>
       {(user) => (
         <div className="flex min-h-full flex-1 flex-col bg-[#eef1f5]">
-          <AppHeader user={user} />
-          <AppNav />
+          <AppHeader user={user} role={role} />
+          <AppNav role={role} />
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-2.5 text-[12.5px] text-blue-700">

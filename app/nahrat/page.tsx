@@ -4,6 +4,8 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
 import { AppNav } from "@/components/AppNav";
+import { useAuth } from "@/lib/useAuth";
+import { useUserRole } from "@/lib/useUserRole";
 import { db, storage } from "@/lib/firebase";
 import {
   collection,
@@ -41,7 +43,6 @@ import {
 import { describeSaveError } from "@/lib/friendlyError";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
-import { useAuth } from "@/lib/useAuth";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
@@ -2345,12 +2346,15 @@ function NesparovaneZpravySection() {
 }
 
 export default function NahratPage() {
+  const { user } = useAuth();
+  const { role } = useUserRole(user);
+
   return (
     <AuthGate>
       {(user) => (
         <div className="flex min-h-full flex-1 flex-col bg-[#eef1f5]">
-          <AppHeader user={user} />
-          <AppNav />
+          <AppHeader user={user} role={role} />
+          <AppNav role={role} />
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <ZamekBanner />
