@@ -25,6 +25,29 @@ function formatDatum(iso: string | null): string {
 function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey: number }) {
   const [radky, setRadky] = useState<RadekUzivatele[] | null>(null);
   const [error, setError] = useState("");
+  const [ukladaSeEmail, setUkladaSeEmail] = useState<string | null>(null);
+
+  const zmenRoli = async (email: string, novaRole: Role) => {
+    setError("");
+    setUkladaSeEmail(email);
+    const predchozi = radky;
+    setRadky((r) => r?.map((u) => (u.email === email ? { ...u, role: novaRole } : u)) ?? r);
+    try {
+      const token = await adminUser.getIdToken();
+      const res = await fetch("/api/nastavit-roli", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email, role: novaRole }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Změna role se nepodařila.");
+    } catch (err) {
+      setRadky(predchozi);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUkladaSeEmail(null);
+    }
+  };
 
   useEffect(() => {
     let zruseno = false;
@@ -70,22 +93,30 @@ function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey:
             </tr>
           </thead>
           <tbody>
-            {radky.map((u) => (
-              <tr key={u.uid} className="border-b border-gray-100">
-                <td className="py-2 text-navy">{u.email}</td>
-                <td className="py-2">
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                      u.role === "admin" ? "bg-orange-50 text-accent" : "bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    {ROLE_LABELY[u.role]}
-                  </span>
-                </td>
-                <td className="py-2 text-gray-500">{formatDatum(u.vytvoreno)}</td>
-                <td className="py-2 text-gray-500">{formatDatum(u.posledniPrihlaseni)}</td>
-              </tr>
-            ))}
+            {radky.map((u) => {
+              const jeToJa = u.email.toLowerCase() === adminUser.email?.toLowerCase();
+              return (
+                <tr key={u.uid} className="border-b border-gray-100">
+                  <td className="py-2 text-navy">{u.email}</td>
+                  <td className="py-2">
+                    <select
+                      value={u.role}
+                      disabled={jeToJa || ukladaSeEmail === u.email}
+                      onChange={(e) => zmenRoli(u.email, e.target.value === "admin" ? "admin" : "uzivatel")}
+                      title={jeToJa ? "Nemůžeš změnit vlastní roli" : undefined}
+                      className={`rounded-full border-0 px-2 py-0.5 text-[11px] font-semibold outline-none disabled:cursor-not-allowed disabled:opacity-70 ${
+                        u.role === "admin" ? "bg-orange-50 text-accent" : "bg-gray-100 text-gray-600"
+                      }`}
+                    >
+                      <option value="uzivatel">{ROLE_LABELY.uzivatel}</option>
+                      <option value="admin">{ROLE_LABELY.admin}</option>
+                    </select>
+                  </td>
+                  <td className="py-2 text-gray-500">{formatDatum(u.vytvoreno)}</td>
+                  <td className="py-2 text-gray-500">{formatDatum(u.posledniPrihlaseni)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
