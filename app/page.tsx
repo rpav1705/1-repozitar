@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   collection,
+  doc,
   DocumentData,
   getCountFromServer,
   getDocs,
@@ -10,9 +11,12 @@ import {
   orderBy,
   query,
   QueryDocumentSnapshot,
+  setDoc,
   Timestamp,
+  updateDoc,
   where,
 } from "firebase/firestore";
+import * as XLSX from "xlsx";
 import { RevizniZpravyImportZdroj } from "@/lib/importLog";
 import { AuthGate } from "@/components/AuthGate";
 import { AppHeader } from "@/components/AppHeader";
@@ -23,6 +27,7 @@ import { db } from "@/lib/firebase";
 import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
+import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
 
 const PLAN_COLLECTION = "planovane_revize";
 const CENIK_COLLECTION = "cenik";
@@ -59,7 +64,30 @@ type PlanRow = {
   zjistenaZavada: string | null;
   /** Cena revize podle čísla zařízení z kolekce "cenik" (viz app/cenik/page.tsx), nebo null, pokud tam zařízení není. */
   cena: number | null;
+  /**
+   * Poznámka o ruční opravě NOK zprávy (viz VysledekReviseBadge) – appka
+   * díky ní zjištěnou závadu opravenou "na papíře" i v appce dál nepočítá
+   * jako otevřenou (efektivniVysledekRevize ji ukáže jako OK), ale pořád je
+   * vidět, že šlo PŮVODNĚ o NOK a kdy/proč se to změnilo. Null = zpráva
+   * nebyla (nebo už není, viz komentář u oprava_* v
+   * lib/revizniZpravyHistorie.ts) takhle ručně opravená.
+   */
+  opravaPoznamka: string | null;
+  opravaDatum: Date | null;
+  opravaUzivatelEmail: string | null;
 };
+
+/**
+ * Efektivní výsledek revize – NOK zpráva s poznámkou o ruční opravě (viz
+ * PlanRow.opravaPoznamka) se pro statistiky/filtrování/karty počítá jako OK
+ * (appka "zprávu mění na OK", jak appka od uživatele požaduje), samotný
+ * badge (VysledekReviseBadge) ale pořád zobrazí, že šlo PŮVODNĚ o NOK a kdy
+ * bylo opraveno – appka tak nikde tiše neschová, že k opravě došlo.
+ */
+function efektivniVysledekRevize(row: PlanRow): VysledekRevize | null {
+  if (row.vysledekRevize === "NOK" && row.opravaPoznamka) return "OK";
+  return row.vysledekRevize;
+}
 
 const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: string }> = {
   OK: { label: "OK", className: "border-status-ok text-status-ok bg-green-50" },
@@ -72,28 +100,80 @@ const VYSLEDEK_REVIZE_META: Record<VysledekRevize, { label: string; className: s
  * na jeden řádek s "…", ať sloupec nerozbíjí šířku tabulky. Najetí myší
  * ukáže celý text (title), kliknutí ho rozbalí/sbalí přímo v buňce (pro
  * dotykové ovládání, kde title nefunguje).
+ *
+ * U NOK zprávy appka navíc nabídne "+ Zaznamenat opravu" – po zapsání
+ * poznámky (co bylo opraveno) appka zprávu ukazuje jako OK (viz
+ * efektivniVysledekRevize), ale badge PŘESTO dál zobrazuje původní NOK
+ * (jako druhý štítek "opraveno") i samotnou poznámku, takže je vidět, že ke
+ * změně došlo ručně po opravě, ne že by zpráva byla od začátku v pořádku.
  */
 function VysledekReviseBadge({
-  vysledek,
-  zavada,
+  row,
+  onOznacitOpravene,
 }: {
-  vysledek: VysledekRevize | null;
-  zavada: string | null;
+  row: PlanRow;
+  onOznacitOpravene: (poznamka: string) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [formOteviren, setFormOteviren] = useState(false);
+  const [poznamkaText, setPoznamkaText] = useState("");
+  const [ukladam, setUkladam] = useState(false);
+  const [chyba, setChyba] = useState("");
 
+  const vysledek = row.vysledekRevize;
   if (!vysledek) return <span className="text-gray-300">—</span>;
 
-  const meta = VYSLEDEK_REVIZE_META[vysledek];
+  const jeOpravene = vysledek === "NOK" && !!row.opravaPoznamka;
+  const zobrazenyVysledek = efektivniVysledekRevize(row) ?? vysledek;
+  const meta = VYSLEDEK_REVIZE_META[zobrazenyVysledek];
+  const zavada = row.zjistenaZavada;
   const zobrazitZavadu = vysledek !== "OK" && zavada;
+
+  const handleUlozitOpravu = async () => {
+    const trimmed = poznamkaText.trim();
+    if (!trimmed) {
+      setChyba("Napiš prosím poznámku o opravě.");
+      return;
+    }
+    setUkladam(true);
+    setChyba("");
+    try {
+      await onOznacitOpravene(trimmed);
+      setFormOteviren(false);
+      setPoznamkaText("");
+    } catch (err) {
+      setChyba(
+        err instanceof Error ? err.message : "Nepodařilo se uložit opravu. Zkus to prosím znovu."
+      );
+    } finally {
+      setUkladam(false);
+    }
+  };
 
   return (
     <div className="flex flex-col items-start gap-1">
-      <span
-        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
-      >
-        {meta.label}
-      </span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span
+          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
+        >
+          {meta.label}
+        </span>
+        {jeOpravene && (
+          <span
+            className="inline-flex items-center rounded-full border border-blue-300 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700"
+            title={
+              row.opravaDatum
+                ? `Původně NOK, opraveno ${row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}${
+                    row.opravaUzivatelEmail ? ` (${row.opravaUzivatelEmail})` : ""
+                  }`
+                : "Původně NOK, opraveno"
+            }
+          >
+            opraveno
+          </span>
+        )}
+      </div>
+
       {zobrazitZavadu && (
         <button
           type="button"
@@ -106,7 +186,175 @@ function VysledekReviseBadge({
           {zavada}
         </button>
       )}
+
+      {jeOpravene && (
+        <p className="max-w-[220px] text-[11px] text-blue-700">
+          Oprava: {row.opravaPoznamka}
+          {row.opravaDatum && (
+            <span className="text-blue-400">
+              {" "}
+              ({row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })})
+            </span>
+          )}
+        </p>
+      )}
+
+      {vysledek === "NOK" && !jeOpravene && !formOteviren && (
+        <button
+          type="button"
+          onClick={() => setFormOteviren(true)}
+          className="text-[11px] font-semibold text-blue-600 hover:underline"
+        >
+          + Zaznamenat opravu
+        </button>
+      )}
+
+      {formOteviren && (
+        <div className="mt-1 flex w-56 flex-col gap-1.5 rounded-md border border-gray-200 bg-gray-50 p-2">
+          <textarea
+            value={poznamkaText}
+            onChange={(e) => setPoznamkaText(e.target.value)}
+            placeholder="Co bylo opraveno…"
+            rows={2}
+            autoFocus
+            className="w-full resize-none rounded border border-gray-300 px-2 py-1 text-[11px] outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          {chyba && <p className="text-[10.5px] text-red-600">{chyba}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleUlozitOpravu}
+              disabled={ukladam}
+              className="rounded bg-status-ok px-2 py-1 text-[10.5px] font-semibold text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {ukladam ? "Ukládám…" : "Označit jako opravené (OK)"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFormOteviren(false);
+                setPoznamkaText("");
+                setChyba("");
+              }}
+              disabled={ukladam}
+              className="text-[10.5px] text-gray-500 hover:underline"
+            >
+              Zrušit
+            </button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * Buňka s cenou – u zařízení bez ceny (viz filtr "Bez ceny") appka místo "—"
+ * nabídne rovnou v tabulce "+ Doplnit cenu", ať uživatel nemusí kvůli
+ * jedné chybějící ceně chodit na stránku Ceník. Uložená cena jde stejnou
+ * cestou i znovu upravit (tužka vedle částky).
+ */
+function CenaBunka({
+  row,
+  onUlozitCenu,
+}: {
+  row: PlanRow;
+  onUlozitCenu: (cena: number) => Promise<void>;
+}) {
+  const [editace, setEditace] = useState(false);
+  const [hodnota, setHodnota] = useState("");
+  const [ukladam, setUkladam] = useState(false);
+  const [chyba, setChyba] = useState("");
+
+  const zahajitEditaci = () => {
+    setHodnota(row.cena !== null ? String(row.cena) : "");
+    setChyba("");
+    setEditace(true);
+  };
+
+  const handleUlozit = async () => {
+    const cena = Number(hodnota.replace(",", "."));
+    if (!hodnota.trim() || Number.isNaN(cena) || cena < 0) {
+      setChyba("Zadej platnou cenu.");
+      return;
+    }
+    setUkladam(true);
+    setChyba("");
+    try {
+      await onUlozitCenu(cena);
+      setEditace(false);
+    } catch (err) {
+      setChyba(
+        err instanceof Error ? err.message : "Nepodařilo se uložit cenu. Zkus to prosím znovu."
+      );
+    } finally {
+      setUkladam(false);
+    }
+  };
+
+  if (editace) {
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={hodnota}
+            onChange={(e) => setHodnota(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleUlozit();
+              if (e.key === "Escape") setEditace(false);
+            }}
+            autoFocus
+            className="w-20 rounded border border-gray-300 px-1.5 py-0.5 text-[11px] outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+          <button
+            type="button"
+            onClick={handleUlozit}
+            disabled={ukladam}
+            className="text-[10.5px] font-semibold text-status-ok hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {ukladam ? "Ukládám…" : "Uložit"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditace(false)}
+            disabled={ukladam}
+            className="text-[10.5px] text-gray-500 hover:underline"
+          >
+            Zrušit
+          </button>
+        </div>
+        {chyba && <p className="text-[10.5px] text-red-600">{chyba}</p>}
+      </div>
+    );
+  }
+
+  if (row.cena !== null) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span>{formatCena(row.cena)}</span>
+        <button
+          type="button"
+          onClick={zahajitEditaci}
+          title="Upravit cenu"
+          className="text-[10px] text-gray-300 hover:text-blue-600"
+        >
+          ✎
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={zahajitEditaci}
+      className="text-[11px] font-semibold text-blue-600 hover:underline"
+    >
+      + Doplnit cenu
+    </button>
   );
 }
 
@@ -145,6 +393,7 @@ type ActiveFilter =
   | "vysledek_ok"
   | "vysledek_nok"
   | "vysledek_ke_kontrole"
+  | "nok_opraveno"
   | "bez_ceny"
   | "s_cenou";
 
@@ -158,6 +407,7 @@ const FILTER_LABELS: Record<ActiveFilter, string> = {
   vysledek_ok: "Výsledek revize: OK",
   vysledek_nok: "Výsledek revize: NOK",
   vysledek_ke_kontrole: "Výsledek revize: Ke kontrole",
+  nok_opraveno: "NOK opraveno",
   bez_ceny: "Bez ceny",
   s_cenou: "S cenou",
 };
@@ -176,6 +426,65 @@ function describeActiveFilter(filter: ActiveFilter, search: string): string | nu
   if (filter !== "all") parts.push(FILTER_LABELS[filter]);
   if (search) parts.push(`hledání „${search}“`);
   return parts.length > 0 ? parts.join(" + ") : null;
+}
+
+/** Krátký, souborový (bez diakritiky/mezer/velkých písmen) tvar textu – pro název exportovaného souboru. */
+function slugify(text: string): string {
+  return normalizeSearchText(text)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Exportuje řádky do .xlsx souboru se stejnými sloupci, jaké appka ukazuje
+ * v tabulce "Přehled zařízení". Appka exportuje přesně tu sadu řádků, kterou
+ * jí zavolající předá (viz volání u tlačítka "Export do Excelu" –
+ * visibleRows PO filtru i hledání), ne celou databázi znovu dotazem, ať
+ * export vždycky odpovídá tomu, co uživatel na obrazovce právě vidí.
+ */
+function exportujDoExcelu(
+  rows: PlanRow[],
+  startOfToday: Date,
+  warnUntil: Date,
+  filter: ActiveFilter,
+  search: string
+) {
+  const data = rows.map((row) => {
+    const status = computeStatus(row.termin, startOfToday, warnUntil);
+    return {
+      "Číslo zařízení": row.cislo_zarizeni,
+      Popis: row.popis,
+      Cena: row.cena ?? "",
+      "Revize platná do": row.termin
+        ? row.termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "chybí termín",
+      "Provedeno dne": row.datumProvedeni
+        ? row.datumProvedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "",
+      "Revizi provedl": row.technikJmeno ?? "",
+      "Číslo oprávnění": row.technikCisloOpravneni ?? "",
+      // Záměrně PŮVODNÍ (ne efektivní) výsledek – export má sloužit i jako
+      // podklad k dohledání historie, ne jen aktuální stav (ten appka i tak
+      // dává najevo přes sloupce "Opraveno"/"Poznámka k opravě" níž).
+      "Výsledek revize": row.vysledekRevize ? VYSLEDEK_REVIZE_META[row.vysledekRevize].label : "",
+      "Zjištěná závada": row.zjistenaZavada ?? "",
+      Opraveno: row.vysledekRevize === "NOK" && row.opravaPoznamka ? "Ano" : "",
+      "Poznámka k opravě": row.opravaPoznamka ?? "",
+      "Datum opravy": row.opravaDatum
+        ? row.opravaDatum.toLocaleDateString("cs-CZ", { timeZone: "UTC" })
+        : "",
+      Stav: STATUS_META[status].label,
+    };
+  });
+
+  const sheet = XLSX.utils.json_to_sheet(data);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, "Přehled");
+
+  const nazevFiltru = filter === "all" ? "vsechny-zaznamy" : slugify(FILTER_LABELS[filter]);
+  const nazevHledani = search ? `-hledani-${slugify(search)}` : "";
+  const datum = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `revize-${nazevFiltru}${nazevHledani}-${datum}.xlsx`);
 }
 
 type DashboardStats = {
@@ -275,6 +584,10 @@ function useDashboardData() {
               typeof record.cislo_zarizeni === "string"
                 ? cenyPodleZarizeni.get(record.cislo_zarizeni) ?? null
                 : null,
+            opravaPoznamka: typeof record.oprava_poznamka === "string" ? record.oprava_poznamka : null,
+            opravaDatum: record.oprava_datum instanceof Timestamp ? record.oprava_datum.toDate() : null,
+            opravaUzivatelEmail:
+              typeof record.oprava_uzivatel_email === "string" ? record.oprava_uzivatel_email : null,
           };
         });
 
@@ -306,7 +619,7 @@ function useDashboardData() {
     };
   }, []);
 
-  return { data, error, loading };
+  return { data, error, loading, setData };
 }
 
 const IMPORT_LOG_COLLECTION = "import_log";
@@ -543,8 +856,8 @@ function ImportLogCard({
   );
 }
 
-function DashboardOverview() {
-  const { data, error, loading } = useDashboardData();
+function DashboardOverview({ userEmail }: { userEmail: string }) {
+  const { data, error, loading, setData } = useDashboardData();
   const { data: importLogs, loading: importLogsLoading } = useImportLogs();
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
@@ -568,18 +881,80 @@ function DashboardOverview() {
   // Stejně jako u ostatních karet počítáno z už načtených řádků – vysledekRevize
   // je null u zařízení bez PDF nebo u starších dat bez zpětného doplnění, taková
   // se do žádné z těchto tří karet nezapočítávají (OK+NOK+KE_KONTROLE <= počet řádků).
+  // Počítá se EFEKTIVNÍ výsledek (viz efektivniVysledekRevize) – ručně opravená
+  // NOK zpráva se tak řadí do "OK", appka ji ale i tak dál zobrazuje s viditelnou
+  // stopou opravy (viz VysledekReviseBadge), jen ji nepočítá jako otevřený problém.
   const pocetVysledekOk = data
-    ? data.rows.filter((row) => row.vysledekRevize === "OK").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "OK").length
     : 0;
   const pocetVysledekNok = data
-    ? data.rows.filter((row) => row.vysledekRevize === "NOK").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "NOK").length
     : 0;
   const pocetVysledekKeKontrole = data
-    ? data.rows.filter((row) => row.vysledekRevize === "KE_KONTROLE").length
+    ? data.rows.filter((row) => efektivniVysledekRevize(row) === "KE_KONTROLE").length
+    : 0;
+  const pocetNokOpraveno = data
+    ? data.rows.filter((row) => row.vysledekRevize === "NOK" && !!row.opravaPoznamka).length
     : 0;
 
   const pocetSCenou = data ? data.rows.filter((row) => row.cena !== null).length : 0;
   const pocetBezCeny = data ? data.rows.length - pocetSCenou : 0;
+
+  /**
+   * Zapíše poznámku o ruční opravě NOK zprávy (viz VysledekReviseBadge) do
+   * "planovane_revize" a hned aktualizuje i lokální stav (setData) – appka
+   * díky tomu po uložení nemusí kvůli jedné opravené položce znovu stahovat
+   * a přepočítávat celý (tisíce řádků velký) přehled.
+   */
+  const oznacitOpraveno = async (rowId: string, poznamka: string) => {
+    const opravaDatum = new Date();
+    await updateDoc(doc(db, PLAN_COLLECTION, rowId), {
+      oprava_poznamka: poznamka,
+      oprava_datum: Timestamp.fromDate(opravaDatum),
+      oprava_uzivatel_email: userEmail,
+    });
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            rows: prev.rows.map((row) =>
+              row.id === rowId
+                ? { ...row, opravaPoznamka: poznamka, opravaDatum, opravaUzivatelEmail: userEmail }
+                : row
+            ),
+          }
+        : prev
+    );
+  };
+
+  /**
+   * Zapíše/upraví cenu zařízení přímo z přehledu (viz CenaBunka) – zapisuje
+   * do STEJNÉ kolekce "cenik" jako import na stránce Ceník (spárováno podle
+   * čísla zařízení, viz useDashboardData výše), takže ruční cena appce funguje
+   * stejně jako cena z nahrané nabídky a případný pozdější import nabídky ji
+   * podle svých pravidel (viz app/cenik/page.tsx) klidně přepíše.
+   */
+  const ulozitCenu = async (row: PlanRow, cena: number) => {
+    const id = sanitizeDocId(row.cislo_zarizeni);
+    if (!id) {
+      throw new Error("Zařízení nemá platné číslo, cenu nelze uložit.");
+    }
+    await setDoc(
+      doc(db, CENIK_COLLECTION, id),
+      {
+        cislo_zarizeni: row.cislo_zarizeni,
+        popis: row.popis,
+        cena,
+        nahrano: Timestamp.fromDate(new Date()),
+      },
+      { merge: true }
+    );
+    setData((prev) =>
+      prev
+        ? { ...prev, rows: prev.rows.map((r) => (r.id === row.id ? { ...r, cena } : r)) }
+        : prev
+    );
+  };
 
   const stats: {
     label: string;
@@ -628,17 +1003,36 @@ function DashboardOverview() {
               disabled={!clickable}
               onClick={() => s.filterValue && setFilter(s.filterValue)}
               title={clickable ? `Zobrazit jen: ${s.label}` : "Zatím bez dat"}
-              className={`rounded-lg border-l-4 bg-white px-[18px] py-4 text-left shadow-sm transition-shadow ${s.color.split(" ")[0]} ${
-                clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"
-              } ${isActive ? "ring-2 ring-navy ring-offset-1" : ""}`}
+              className={`rounded-lg border-l-4 px-[18px] py-4 text-left transition-all ${
+                isActive
+                  ? // Plný sytý podklad V BARVĚ karty + bílý text, stejný vzor jako
+                    // aktivní stav tlačítka "Nutno doplnit data" níž (border-status-missing
+                    // bg-status-missing text-white) – appka barvy definuje přes sdílené
+                    // tokeny v app/globals.css, takže "bg-<token>" existuje pro každou
+                    // stejně jako "border-<token>" (odvozeno z s.color.split(" ")[0]).
+                    // Silnější stín + mírné zvětšení navíc dají kartě dojem, že "vystoupí"
+                    // nad ostatní (3D efekt), ne jen že změnila barvu.
+                    `border-transparent shadow-xl scale-[1.03] ${s.color
+                      .split(" ")[0]
+                      .replace("border-", "bg-")}`
+                  : `bg-white shadow-sm ${s.color.split(" ")[0]}`
+              } ${clickable ? "cursor-pointer hover:shadow-md" : "cursor-default opacity-90"}`}
             >
-              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
+              <div
+                className={`text-[11px] font-bold uppercase tracking-wide ${
+                  isActive ? "text-white/80" : "text-gray-500"
+                }`}
+              >
                 {s.label}
               </div>
-              <div className={`mt-1.5 text-[28px] font-bold ${s.color.split(" ")[1]}`}>
+              <div
+                className={`mt-1.5 text-[28px] font-bold ${isActive ? "text-white" : s.color.split(" ")[1]}`}
+              >
                 {s.value}
               </div>
-              <div className="mt-0.5 text-[11px] text-gray-400">{s.note}</div>
+              <div className={`mt-0.5 text-[11px] ${isActive ? "text-white/70" : "text-gray-400"}`}>
+                {s.note}
+              </div>
             </button>
           );
         })}
@@ -706,7 +1100,7 @@ function DashboardOverview() {
               title="Zobrazit jen zařízení bez spárované aktuální revizní zprávy"
               className={`px-3 py-2 transition-colors ${
                 filter === "bez_zpravy"
-                  ? "bg-status-missing text-white"
+                  ? "bg-red-600 text-white"
                   : "bg-red-50 text-red-700 hover:bg-red-100"
               }`}
             >
@@ -765,6 +1159,17 @@ function DashboardOverview() {
               >
                 Ke kontrole ({pocetVysledekKeKontrole})
               </button>
+              <button
+                onClick={() => setFilter("nok_opraveno")}
+                title="Zobrazit jen NOK zařízení s ručně zaznamenanou opravou"
+                className={`border-l border-gray-300 px-3 py-2 transition-colors ${
+                  filter === "nok_opraveno"
+                    ? "bg-blue-600 text-white"
+                    : "bg-blue-50 text-blue-700 hover:bg-blue-100"
+                }`}
+              >
+                NOK opraveno ({pocetNokOpraveno})
+              </button>
             </div>
           </div>
         )}
@@ -776,7 +1181,7 @@ function DashboardOverview() {
               title="Zobrazit jen zařízení bez ceny v ceníku"
               className={`px-3 py-2 transition-colors ${
                 filter === "bez_ceny"
-                  ? "bg-status-missing text-white"
+                  ? "bg-red-600 text-white"
                   : "bg-red-50 text-red-700 hover:bg-red-100"
               }`}
             >
@@ -817,9 +1222,10 @@ function DashboardOverview() {
                 if (filter === "all") return true;
                 if (filter === "bez_zpravy") return row.posledniRevizniZpravaUrl === null;
                 if (filter === "s_zpravou") return row.posledniRevizniZpravaUrl !== null;
-                if (filter === "vysledek_ok") return row.vysledekRevize === "OK";
-                if (filter === "vysledek_nok") return row.vysledekRevize === "NOK";
-                if (filter === "vysledek_ke_kontrole") return row.vysledekRevize === "KE_KONTROLE";
+                if (filter === "vysledek_ok") return efektivniVysledekRevize(row) === "OK";
+                if (filter === "vysledek_nok") return efektivniVysledekRevize(row) === "NOK";
+                if (filter === "vysledek_ke_kontrole") return efektivniVysledekRevize(row) === "KE_KONTROLE";
+                if (filter === "nok_opraveno") return row.vysledekRevize === "NOK" && !!row.opravaPoznamka;
                 if (filter === "bez_ceny") return row.cena === null;
                 if (filter === "s_cenou") return row.cena !== null;
                 return computeStatus(row.termin, startOfToday, warnUntil) === filter;
@@ -836,9 +1242,23 @@ function DashboardOverview() {
           <div className="overflow-hidden rounded-lg bg-white shadow-sm">
             <div className="flex items-center justify-between bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
               <span>Přehled zařízení</span>
-              <span className="text-[12px] font-normal text-white/60">
-                {data ? `${visibleRows.length} záznamů` : loading ? "Načítám…" : "0 záznamů"}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-[12px] font-normal text-white/60">
+                  {data ? `${visibleRows.length} záznamů` : loading ? "Načítám…" : "0 záznamů"}
+                </span>
+                {data && visibleRows.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      exportujDoExcelu(visibleRows, startOfToday, warnUntil, filter, trimmedSearch)
+                    }
+                    title="Exportovat právě zobrazené záznamy (podle aktivního filtru a hledání) do Excelu"
+                    className="rounded-md border border-white/30 bg-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white transition-colors hover:bg-white/20"
+                  >
+                    Export do Excelu
+                  </button>
+                )}
+              </div>
             </div>
 
             {data && activeDescription && (
@@ -901,11 +1321,7 @@ function DashboardOverview() {
                           <td className="py-2 pl-[14px] pr-4">{row.cislo_zarizeni}</td>
                           <td className="py-2 pr-4">{row.popis}</td>
                           <td className="py-2 pr-4">
-                            {row.cena !== null ? (
-                              formatCena(row.cena)
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
+                            <CenaBunka row={row} onUlozitCenu={(cena) => ulozitCenu(row, cena)} />
                           </td>
                           <td className="py-2 pr-4">
                             {row.termin ? (
@@ -923,7 +1339,10 @@ function DashboardOverview() {
                           <td className="py-2 pr-4">{row.technikJmeno || "—"}</td>
                           <td className="py-2 pr-4">{row.technikCisloOpravneni || "—"}</td>
                           <td className="py-2 pr-4">
-                            <VysledekReviseBadge vysledek={row.vysledekRevize} zavada={row.zjistenaZavada} />
+                            <VysledekReviseBadge
+                              row={row}
+                              onOznacitOpravene={(poznamka) => oznacitOpraveno(row.id, poznamka)}
+                            />
                           </td>
                           <td className={`py-2 pr-[18px] font-semibold ${meta.text}`}>
                             {meta.label}
@@ -1016,7 +1435,7 @@ export default function Home() {
               Vítej, {user.email}!
             </div>
 
-            <DashboardOverview />
+            <DashboardOverview userEmail={user.email ?? "neznámý uživatel"} />
           </div>
         </div>
       )}

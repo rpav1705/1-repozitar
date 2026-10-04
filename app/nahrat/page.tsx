@@ -144,16 +144,6 @@ type NeaktivniVysledek = {
   bezPu: number;
 };
 
-// Výsledek úklidu záznamů, jejichž PÚ v novém souboru vůbec není přítomný
-// (na rozdíl od NeaktivniVysledek u nich nedává smysl "bezPu" – jde vždycky
-// o existující záznamy, které PÚ v databázi už mají).
-type ZmizeleVysledek = {
-  zpracovano: number;
-  planSmazano: number;
-  zpravSmazano: number;
-  souboruSmazano: number;
-};
-
 /**
  * Banner nad všemi třemi sekcemi téhle stránky – ukáže, jestli právě (i
  * v JINÉ kartě/prohlížeči/u jiného uživatele) běží import plánu nebo
@@ -184,7 +174,6 @@ function PlanUpload() {
   const [error, setError] = useState("");
   const [savedCount, setSavedCount] = useState(0);
   const [neaktivniVysledek, setNeaktivniVysledek] = useState<NeaktivniVysledek | null>(null);
-  const [zmizeleVysledek, setZmizeleVysledek] = useState<ZmizeleVysledek | null>(null);
 
   const missingTerminCount = rows.filter((row) => !row.termin).length;
 
@@ -199,7 +188,6 @@ function PlanUpload() {
       setSkipped(result.skipped);
       setInactiveRows(result.inactive);
       setNeaktivniVysledek(null);
-      setZmizeleVysledek(null);
       setStatus("parsed");
     } catch (err) {
       setError(
@@ -241,7 +229,6 @@ function PlanUpload() {
     setStatus("saving");
     setSavedCount(0);
     setNeaktivniVysledek(null);
-    setZmizeleVysledek(null);
     try {
       const col = collection(db, "planovane_revize");
 
@@ -268,19 +255,6 @@ function PlanUpload() {
       const pridanoList: string[] = [];
       const aktualizovanoList: string[] = [];
       const smazanoList: string[] = [];
-
-      // Množina VŠECH PÚ přítomných v novém souboru (aktivní i INACTIVE řádky
-      // – ty jsou v souboru pořád přítomné, jen se neimportují) – použije se
-      // níž k odhalení PÚ, které v novém souboru už vůbec nejsou (zdrojový
-      // systém daný řádek/PÚ smazal/sloučil), viz úklid "zmizelých" záznamů
-      // za oběma dávkami zápisu/mazání.
-      const noveIdsVSouboru = new Set<string>();
-      for (const row of rows) {
-        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
-      }
-      for (const row of inactiveRows) {
-        if (row.pu) noveIdsVSouboru.add(sanitizeDocId(row.pu));
-      }
 
       let saved = 0;
       for (const batchRows of chunk(rows, BATCH_SIZE)) {
@@ -357,57 +331,23 @@ function PlanUpload() {
         });
       }
 
-      // Existující záznamy, jejichž PÚ v NOVÉM souboru vůbec není přítomný
-      // (ani jako aktivní, ani jako INACTIVE) – zdrojový systém daný
-      // řádek/PÚ smazal/sloučil přímo u sebe, aniž by ho označil jako
-      // INACTIVE. Appka je smaže úplně stejně jako řádky se Stavem
-      // INACTIVE (smazNeaktivniZarizeni níž se navíc postará i o revizní
-      // zprávy – ty jsou spárované podle čísla zařízení, ne podle
-      // konkrétního PÚ, takže se samy "převáží" na zbývající řádek stejného
-      // zařízení a smažou se jen tehdy, když už u čísla zařízení nezůstal
-      // v plánu žádný jiný záznam). Týká se jen záznamů vzniklých z
-      // PÚ-klíčovaného importu (mají vyplněné pole "pu") – záznamy bez PÚ
-      // (vzniklé kdysi s náhodným ID, appka je needituje) takhle spárovat
-      // nejde, necháme je beze změny. Obecná logika, netýká se jen
-      // "skupiny C" – čistí se tak i budoucí podobné případy u libovolného
-      // zařízení.
-      let zmizeleZpracovano = 0;
-      let zmizelePlanSmazano = 0;
-      let zmizeleZpravSmazano = 0;
-      let zmizeleSouboruSmazano = 0;
-      const smazanoZmizeleList: string[] = [];
-      for (const existingDoc of existingSnap.docs) {
-        const existingData = existingDoc.data();
-        const existingPu = typeof existingData.pu === "string" ? existingData.pu : "";
-        if (!existingPu) continue;
-        if (noveIdsVSouboru.has(existingDoc.id)) continue;
-
-        zmizeleZpracovano += 1;
-        const existingCisloZarizeni =
-          typeof existingData.cislo_zarizeni === "string" ? existingData.cislo_zarizeni : "";
-        const vysledek = await smazNeaktivniZarizeni(existingDoc.id, existingCisloZarizeni);
-        if (vysledek.planSmazan) {
-          zmizelePlanSmazano += 1;
-          smazanoZmizeleList.push(existingCisloZarizeni);
-        }
-        zmizeleZpravSmazano += vysledek.smazanoZaznamu;
-        zmizeleSouboruSmazano += vysledek.smazanoSouboru;
-      }
-      if (zmizeleZpracovano > 0) {
-        setZmizeleVysledek({
-          zpracovano: zmizeleZpracovano,
-          planSmazano: zmizelePlanSmazano,
-          zpravSmazano: zmizeleZpravSmazano,
-          souboruSmazano: zmizeleSouboruSmazano,
-        });
-      }
-
+      // Appka záměrně NEmaže zařízení jen kvůli tomu, že jejich PÚ v nově
+      // nahraném souboru chybí – import je čistě přírůstkový/aktualizační
+      // (přidá nové, aktualizuje existující podle řádků, co v souboru
+      // opravdu jsou) a nikdy nesmí zasáhnout zařízení mimo něj. Jediný
+      // způsob, jak appka zařízení maže, je výslovný "Stav" = "INACTIVE" u
+      // KONKRÉTNÍHO řádku výš – ne nepřítomnost. Appka dřív navíc takhle
+      // "zmizelé" (nepřítomné) záznamy sama mazala i s revizními zprávami a
+      // PDF – u neúplného/špatného souboru (např. omylem nahraného výřezu
+      // pár řádků místo celého exportu) to reálně smazalo 329 z 2891
+      // zařízení, než si toho někdo stihl všimnout. Appka žádné zálohy ani
+      // point-in-time recovery nemá, takže se to nedalo jednoduše vrátit.
       try {
         await zapisPlanImportLog({
           pridano: pridanoList,
           aktualizovano: aktualizovanoList,
           smazano: smazanoList,
-          smazano_zmizele: smazanoZmizeleList,
+          smazano_zmizele: [],
         });
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
@@ -439,14 +379,14 @@ function PlanUpload() {
           <code className="rounded bg-gray-100 px-1 py-0.5">chybi_termin</code>, ať se dají dohledat
           a ručně doplnit. Řádky se sloupcem &bdquo;Stav&ldquo; = &bdquo;INACTIVE&ldquo; se NEnaimportují –
           existující záznam pro dané zařízení (a jeho revizní zprávy) se naopak smaže, appka
-          neaktivní zařízení nedrží. Appka navíc při každém importu smaže i existující záznamy,
-          jejichž PÚ v novém souboru vůbec není přítomný (zdroj daný řádek/PÚ smazal nebo sloučil,
-          i když ho neoznačil jako INACTIVE) – ostatních, nezměněných záznamů se import nedotýká.
+          neaktivní zařízení nedrží. Import je jinak čistě přírůstkový/aktualizační – appka přidá
+          nové a aktualizuje existující řádky podle toho, co je v souboru, a zařízení, která v
+          souboru chybí, se nijak nedotkne (klidně nahraj i jen výřez pár řádků).
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
-            label="Vybrat soubor (.xls Maximo)"
+            label="Vybrat soubor (.xls / .xlsx Maximo)"
             accept=".xls,.xlsx"
             onChange={(fileList) => {
               setFile(fileList?.[0] ?? null);
@@ -454,7 +394,6 @@ function PlanUpload() {
               setSkipped([]);
               setInactiveRows([]);
               setNeaktivniVysledek(null);
-              setZmizeleVysledek(null);
               setStatus("idle");
             }}
             selectedText={file ? file.name : "Žádný soubor nevybrán"}
@@ -524,15 +463,6 @@ function PlanUpload() {
                 {neaktivniVysledek.bezPu > 0 &&
                   ` (${neaktivniVysledek.bezPu} nešlo automaticky spárovat – chybí PÚ)`}
                 .
-              </p>
-            )}
-
-            {status === "saved" && zmizeleVysledek && (
-              <p className="rounded-md bg-gray-100 px-3 py-2 text-[12.5px] text-gray-600">
-                Zmizelé řádky (PÚ v novém souboru už vůbec není, i když nebyl označen INACTIVE):
-                nalezeno {zmizeleVysledek.zpracovano}, smazáno {zmizeleVysledek.planSmazano} záznamů z
-                plánu, {zmizeleVysledek.zpravSmazano} revizních zpráv a {zmizeleVysledek.souboruSmazano}{" "}
-                PDF souborů ze Storage.
               </p>
             )}
 
@@ -679,7 +609,7 @@ function pluralizeSoubor(count: number): string {
   return "souborů";
 }
 
-function RevizniZpravyUpload() {
+function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
   const { user } = useAuth();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
@@ -888,6 +818,14 @@ function RevizniZpravyUpload() {
     setProcessed(allProcessed);
     setSkippedPages(allSkipped);
     setStatus(allProcessed.length === 0 && allSkipped.length === 0 ? "idle" : "done");
+    // Sekce "Znovu zpracovat uložené revizní zprávy" (RevizniZpravyReprocess)
+    // si počet zpráv ke zpracování zjišťuje jen jednou při zamountování –
+    // bez týhle notifikace by po nahrání nových zpráv tady nahoře ukazovala
+    // starý (nižší) počet, dokud by uživatel stránku ručně neobnovil nebo na
+    // ni znovu nepřišel. Volá se jen když se opravdu něco zapsalo (viz
+    // allProcessed.length výš) – u dávky, která se celá jen přeskočila,
+    // netřeba nic přepočítávat.
+    if (allProcessed.length > 0) onUlozeno();
     } finally {
       clearInterval(heartbeatId);
       await uvolniZamek();
@@ -1290,7 +1228,7 @@ function smazatReprocessCheckpoint() {
  * ukládá do localStorage (viz ReprocessCheckpoint) – při příštím spuštění
  * appka nabídne pokračovat jen se zbývajícími, místo aby začínala od nuly.
  */
-function RevizniZpravyReprocess() {
+function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
   const { user } = useAuth();
   const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
@@ -1370,9 +1308,14 @@ function RevizniZpravyReprocess() {
   // Zjištění počtů se stejnou logikou (vyberAktualniZpravy +
   // jeZpracovanoReprocessem), jakou pak použije samotné zpracování – ať
   // čísla u tlačítek sedí s tím, co appka po kliknutí skutečně zpracuje.
+  // "reloadKey" (viz NahratPage) se zvýší po úspěšném nahrání nových
+  // revizních zpráv v RevizniZpravyUpload výš na stránce – bez něj by
+  // appka počty přepočítala jen jednou při zamountování a po nahrání by
+  // ukazovala starý (nižší) počet, dokud by uživatel stránku ručně
+  // neobnovil.
   useEffect(() => {
     nacistPocty();
-  }, []);
+  }, [reloadKey]);
 
   const handleReprocess = async (mod: ReprocessMod, moznosti?: { pokracovat?: boolean }) => {
     if (bezicíZpracovani) {
@@ -2348,6 +2291,11 @@ function NesparovaneZpravySection() {
 export default function NahratPage() {
   const { user } = useAuth();
   const { role } = useUserRole(user);
+  // Zvýší se po úspěšném nahrání nových revizních zpráv v RevizniZpravyUpload
+  // – RevizniZpravyReprocess si podle něj přepočítá "Ke zpracování: N
+  // nových…" (jinak by ten počet zůstal starý, dokud by uživatel stránku
+  // ručně neobnovil, viz komentář tam).
+  const [revizniZpravyReloadKey, setRevizniZpravyReloadKey] = useState(0);
 
   return (
     <AuthGate>
@@ -2359,8 +2307,8 @@ export default function NahratPage() {
           <div className="flex flex-col gap-4 px-7 py-6">
             <ZamekBanner />
             <PlanUpload />
-            <RevizniZpravyUpload />
-            <RevizniZpravyReprocess />
+            <RevizniZpravyUpload onUlozeno={() => setRevizniZpravyReloadKey((k) => k + 1)} />
+            <RevizniZpravyReprocess reloadKey={revizniZpravyReloadKey} />
             <NesparovaneZpravySection />
           </div>
         </div>
