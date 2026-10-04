@@ -50,6 +50,7 @@ function SeznamUzivatelu({ adminUser, reloadKey }: { adminUser: User; reloadKey:
   };
 
   const zmenRoli = async (email: string, novaRole: Role) => {
+    if (!window.confirm(`Opravdu změnit roli uživatele ${email} na „${ROLE_LABELY[novaRole]}"?`)) return;
     setError("");
     setUkladaSeEmail(email);
     const predchozi = radky;
