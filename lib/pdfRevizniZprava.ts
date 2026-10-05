@@ -1032,10 +1032,24 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
     new RegExp(fuzzyD("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + upozorneni + "|$)", "i")
   );
   const zavadyText = zavadyMatch ? zavadyMatch[1].trim().slice(0, 200) : "";
-  const zavadyPrazdne = /^[-–—.\s]*$/.test(zavadyText);
+  // Pole "Termín odstranění závad" je prázdné ("---"), i když OCR přidá
+  // zbloudilé znaky ("--- :", "— |"). Závada se bere jako uvedená, jen když
+  // pole obsahuje číslici (termín) nebo slovo z aspoň 4 písmen, které
+  // nepatří mezi běžné "nic tu není" fráze.
+  const BEZ_ZAVAD = new Set(["žádné", "žádný", "žádná", "nejsou", "není", "nebyly", "bez", "závad", "závady", "neuvedeno", "nehodí"]);
+  const zavadyPritomne = zavadyText
+    .toLowerCase()
+    .split(/[^\p{L}\d]+/u)
+    .filter(Boolean)
+    .some((token) => /\d/.test(token) || (token.length >= 4 && !BEZ_ZAVAD.has(token)));
+  const zavadyPrazdne = !zavadyPritomne;
 
-  const jePozitivni = new RegExp(fuzzyD("schopen dalšího bezpečného provozu"), "i").test(vysledekText);
-  const jeNegativni = /nen[ií]\s*schopen|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(vysledekText);
+  // Verdikt (kladný/záporný) se hledá jen ve větě před "Platnost …" – za ní
+  // následují poznámky a obecné texty, ve kterých se mohou objevit slova jako
+  // "nesmí" a nesouvisí s výsledkem revize.
+  const verdikt = vysledekText.split(/Platnost/i)[0];
+  const jePozitivni = new RegExp(fuzzyD("schopen dalšího bezpečného provozu"), "i").test(verdikt);
+  const jeNegativni = /nen[ií]\s*schopen|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(verdikt);
 
   let vysledek_revize: VysledekRevize = "KE_KONTROLE";
   let zjistena_zavada: string | null = null;
@@ -1058,10 +1072,16 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
  * "Š mí dl" / "Š m í d l") slije zpět do slova.
  */
 function slijRozdelenaPismena(jmeno: string): string {
-  const bezSumu = jmeno.replace(/^.*[):;]\s*/, "");
+  // Svislé čáry razítka OCR čte jako "|" – jméno je až za poslední z nich.
+  const bezSumu = jmeno
+    .replace(/^.*[):;|]\s*/, "")
+    // Slepené slovo s velkým písmenem uvnitř ("BohumilŠ") se rozdělí.
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2");
   const tokeny = bezSumu
     .split(/\s+/)
     .filter(Boolean)
+    // OCR čte "l" jako "1" – u krátkých zlomků ("d1") se číslice vrátí na "l".
+    .map((t) => (t.length <= 2 ? t.replace(/1/g, "l") : t))
     .filter((t) => !(t.length >= 3 && /^\p{Lu}+$/u.test(t)));
   const vystup: string[] = [];
   let beh: string[] = [];
