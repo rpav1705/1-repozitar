@@ -29,6 +29,7 @@ import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
 import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
 import { KolekceRevizi } from "@/lib/typRevize";
+import { DRUH_REVIZE_LABELS, druhProFrekvenci } from "@/lib/druhRevize";
 import { useTypRevize } from "@/lib/TypRevizeContext";
 
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
@@ -40,6 +41,9 @@ const MISSING_TERMIN_STAV = "chybi_termin";
 type PlanRow = {
   id: string;
   cislo_zarizeni: string;
+  /** Frekvence plánované revize (číslo) a její jednotky ("YEARS" apod.) z importu plánu. */
+  frekvence: number | null;
+  jednotkyFrekvence: string;
   popis: string;
   /** null = při importu se nepodařilo rozpoznat termín (stav "chybi_termin"). */
   termin: Date | null;
@@ -435,6 +439,31 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function slovoPodlePoctu(n: number, jedna: string, dvaAzCtyri: string, petAVic: string): string {
+  if (n === 1) return jedna;
+  if (n >= 2 && n <= 4) return dvaAzCtyri;
+  return petAVic;
+}
+
+/** "1 rok", "5 let", "10 let" (jednotky z Maxima: YEARS, MONTHS…), jinak číslo s původní jednotkou. */
+function formatFrekvence(frekvence: number | null, jednotky: string): string {
+  if (frekvence === null) return "—";
+  const j = jednotky.trim().toUpperCase();
+  if (j === "YEARS" || j === "YEAR") return `${frekvence} ${slovoPodlePoctu(frekvence, "rok", "roky", "let")}`;
+  if (j === "MONTHS" || j === "MONTH") {
+    return `${frekvence} ${slovoPodlePoctu(frekvence, "měsíc", "měsíce", "měsíců")}`;
+  }
+  if (j === "DAYS" || j === "DAY") return `${frekvence} ${slovoPodlePoctu(frekvence, "den", "dny", "dní")}`;
+  return `${frekvence} ${jednotky}`.trim();
+}
+
+/** Druh revize odpovídající frekvenci řádku (provozní/vnitřní/tlaková zkouška), jinak prázdný řetězec. */
+function druhRevizeProRadek(row: PlanRow): string {
+  const druh =
+    row.jednotkyFrekvence.trim().toUpperCase().startsWith("YEAR") ? druhProFrekvenci(row.frekvence) : null;
+  return druh ? DRUH_REVIZE_LABELS[druh] : "";
+}
+
 /**
  * Exportuje řádky do .xlsx souboru se stejnými sloupci, jaké appka ukazuje
  * v tabulce "Přehled zařízení". Appka exportuje přesně tu sadu řádků, kterou
@@ -447,12 +476,19 @@ function exportujDoExcelu(
   startOfToday: Date,
   warnUntil: Date,
   filter: ActiveFilter,
-  search: string
+  search: string,
+  zobrazitFrekvenci: boolean
 ) {
   const data = rows.map((row) => {
     const status = computeStatus(row.termin, startOfToday, warnUntil);
     return {
       "Číslo zařízení": row.cislo_zarizeni,
+      ...(zobrazitFrekvenci
+        ? {
+            Frekvence: formatFrekvence(row.frekvence, row.jednotkyFrekvence),
+            "Druh revize": druhRevizeProRadek(row),
+          }
+        : {}),
       Popis: row.popis,
       Cena: row.cena ?? "",
       "Revize platná do": row.termin
@@ -555,6 +591,9 @@ function useDashboardData(kolekce: KolekceRevizi) {
           return {
             id: d.id,
             cislo_zarizeni: typeof record.cislo_zarizeni === "string" ? record.cislo_zarizeni : "",
+            frekvence: typeof record.frekvence === "number" ? record.frekvence : null,
+            jednotkyFrekvence:
+              typeof record.jednotky_frekvence === "string" ? record.jednotky_frekvence : "",
             popis: typeof record.popis === "string" ? record.popis : "",
             termin: record.termin instanceof Timestamp ? record.termin.toDate() : null,
             stav: typeof record.stav === "string" ? record.stav : "",
@@ -1254,7 +1293,14 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                   <button
                     type="button"
                     onClick={() =>
-                      exportujDoExcelu(visibleRows, startOfToday, warnUntil, filter, trimmedSearch)
+                      exportujDoExcelu(
+                        visibleRows,
+                        startOfToday,
+                        warnUntil,
+                        filter,
+                        trimmedSearch,
+                        kolekce.zobrazitFrekvenci
+                      )
                     }
                     title="Exportovat právě zobrazené záznamy (podle aktivního filtru a hledání) do Excelu"
                     className="rounded-md border border-white/30 bg-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white transition-colors hover:bg-white/20"
@@ -1303,6 +1349,9 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                   <thead>
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-2 pl-[18px] pr-4 font-semibold">Číslo zařízení</th>
+                      {kolekce.zobrazitFrekvenci && (
+                        <th className="py-2 pr-4 font-semibold">Frekvence</th>
+                      )}
                       <th className="py-2 pr-4 font-semibold">Popis</th>
                       <th className="py-2 pr-4 font-semibold">Cena</th>
                       <th className="py-2 pr-4 font-semibold">Revize platná do:</th>
@@ -1323,6 +1372,18 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                           className={`border-l-4 border-b border-gray-100 ${meta.border}`}
                         >
                           <td className="py-2 pl-[14px] pr-4">{row.cislo_zarizeni}</td>
+                          {kolekce.zobrazitFrekvenci && (
+                            <td className="py-2 pr-4 whitespace-nowrap">
+                              <div className="font-semibold">
+                                {formatFrekvence(row.frekvence, row.jednotkyFrekvence)}
+                              </div>
+                              {druhRevizeProRadek(row) && (
+                                <div className="text-[10.5px] text-gray-400">
+                                  {druhRevizeProRadek(row)}
+                                </div>
+                              )}
+                            </td>
+                          )}
                           <td className="py-2 pr-4">{row.popis}</td>
                           <td className="py-2 pr-4">
                             <CenaBunka row={row} onUlozitCenu={(cena) => ulozitCenu(row, cena)} />

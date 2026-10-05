@@ -31,6 +31,14 @@ export function frekvenceProDruh(druh: DruhRevize): number {
   return FREKVENCE_PODLE_DRUHU[druh];
 }
 
+/** Druh revize, který odpovídá frekvenci (v letech) řádku plánu, nebo null u neznámé frekvence. */
+export function druhProFrekvenci(frekvence: number | null): DruhRevize | null {
+  for (const [druh, f] of Object.entries(FREKVENCE_PODLE_DRUHU) as [DruhRevize, number][]) {
+    if (f === frekvence) return druh;
+  }
+  return null;
+}
+
 /** Jestli řádek plánu s touhle frekvencí patří k danému druhu revize. */
 export function planOdpovidaDruhu(planFrekvence: unknown, druh: DruhRevize): boolean {
   return typeof planFrekvence === "number" && planFrekvence === FREKVENCE_PODLE_DRUHU[druh];

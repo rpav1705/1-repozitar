@@ -37,6 +37,12 @@ export type KolekceRevizi = {
    * jazykový model, proto je u ostatních druhů vypnuté.
    */
   ocr: boolean;
+  /**
+   * Jestli přehled ukazuje sloupec "Frekvence" (hned za číslem zařízení). U
+   * druhů, kde má zařízení víc plánovaných revizí s různou frekvencí (tlakové
+   * nádoby: 1/5/10 let), jinak není poznat, který řádek je která revize.
+   */
+  zobrazitFrekvenci: boolean;
 };
 
 const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
@@ -49,6 +55,7 @@ const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
     cenik: "cenik",
     storagePrefix: "revizni_zpravy",
     ocr: false,
+    zobrazitFrekvenci: false,
   },
   tlakove_nadoby: {
     typ: "tlakove_nadoby",
@@ -59,6 +66,7 @@ const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
     cenik: "cenik_tlakove_nadoby",
     storagePrefix: "revizni_zpravy/tlakove_nadoby",
     ocr: true,
+    zobrazitFrekvenci: true,
   },
 };
 
