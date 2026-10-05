@@ -975,8 +975,10 @@ function spojRadky(lines: string[]): string {
 function extractCisloZarizeniTlakovaNadoba(lines: string[]): string | null {
   const text = lines.join(" ");
   const vzory = [
-    new RegExp(fuzzyD("označení") + ":?\\s*T\\s*N\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
-    /\bT\s?N\s?[-–]?\s?([\dOo]{2,4})\b/,
+    // Volitelné "S" za "TN" ("TNS147") – některé protokoly číslo takhle zapisují,
+    // v plánu je zařízení vedené vždy jako TN147, proto se "S" zahodí.
+    new RegExp(fuzzyD("označení") + ":?\\s*T\\s*N\\s*S?\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
+    /\bT\s?N\s?S?\s?[-–]?\s?([\dOo]{2,4})\b/,
   ];
   for (const vzor of vzory) {
     const match = text.match(vzor);
