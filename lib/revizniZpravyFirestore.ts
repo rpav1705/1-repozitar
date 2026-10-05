@@ -34,6 +34,7 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
           dalsi_terminy: zprava.dalsi_terminy.map((t) => ({
             druh: t.druh,
             termin: Timestamp.fromDate(t.termin),
+            ...(t.jenRok ? { jen_rok: true } : {}),
           })),
         }
       : {}),

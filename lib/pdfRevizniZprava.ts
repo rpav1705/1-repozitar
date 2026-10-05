@@ -21,7 +21,12 @@ import { OcrEngine, ocrRadkyStranky, vytvorOcr } from "./ocrStranky";
 export type VysledekRevize = "OK" | "NOK" | "KE_KONTROLE";
 
 /** Termín příští revize JINÉHO druhu, který protokol uvádí navíc (viz extractDalsiTerminyTlakovaNadoba). */
-export type DalsiTermin = { druh: DruhRevize; termin: Date };
+export type DalsiTermin = {
+  druh: DruhRevize;
+  termin: Date;
+  /** Protokol uvádí jen rok ("2030") – termín je konec toho roku a jen orientační (viz dosadDalsiTerminy). */
+  jenRok?: boolean;
+};
 
 export type ParsedRevizniZprava = {
   cislo_zarizeni: string;
@@ -1032,12 +1037,18 @@ function extractDalsiTerminyTlakovaNadoba(
     const match = text.match(
       new RegExp(
         fuzzyD("následující " + popisek) +
-          ":?\\s*(\\d{1,2}\\s*/\\s*\\d{2,4}|\\d{1,2}\\s*\\.\\s*\\d{1,2}\\s*\\.\\s*\\d{4})",
+          ":?\\s*(\\d{1,2}\\s*/\\s*\\d{2,4}|\\d{1,2}\\s*\\.\\s*\\d{1,2}\\s*\\.\\s*\\d{4}|\\d{4})",
         "i"
       )
     );
     if (!match) continue;
-    const termin = parseTerminHodnota(match[1].replace(/\s+/g, ""));
+    const hodnota = match[1].replace(/\s+/g, "");
+    if (/^\d{4}$/.test(hodnota)) {
+      // Jen rok ("následující zkouška těsnosti: 2030") – konec roku, označeno jako orientační.
+      vysledek.push({ druh, termin: new Date(Date.UTC(Number(hodnota), 11, 31)), jenRok: true });
+      continue;
+    }
+    const termin = parseTerminHodnota(hodnota);
     if (termin) vysledek.push({ druh, termin });
   }
   return vysledek;
