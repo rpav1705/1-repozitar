@@ -193,6 +193,9 @@ export async function synchronizujHistoriiZarizeni(
   let smazanoSouboru = 0;
   let duplicitSmazano = 0;
   let planSynchronizovan = false;
+  // Nejnovější ponechaná zpráva za každý druh – z ní se po synchronizaci plánu
+  // dosadí "další termíny" jiných druhů (viz dosadDalsiTerminy).
+  const nejnovejsiPodleDruhu: Radek[] = [];
 
   for (const [klic, radkyDruhu] of podleDruhu) {
     // Duplicity (stejné datum provedení) se sloučí PŘED seřazením/oříznutím na
@@ -219,9 +222,59 @@ export async function synchronizujHistoriiZarizeni(
       jeDruhRevize(klic) ? klic : null
     );
     planSynchronizovan = planSynchronizovan || synchronizovano;
+    if (ponechane.length > 0) nejnovejsiPodleDruhu.push(ponechane[0]);
   }
 
+  await dosadDalsiTerminy(cisloZarizeni, nejnovejsiPodleDruhu, kolekce);
+
   return { smazanoZaznamu, smazanoSouboru, duplicitSmazano, planSynchronizovan };
+}
+
+/**
+ * Některé protokoly uvádějí i termín příští revize JINÉHO druhu (např.
+ * provozní revize tlakové nádoby: "následující zkouška těsnosti: 11/2030") –
+ * ten appka dosadí jako termín odpovídajícího řádku plánu (podle frekvence,
+ * viz lib/druhRevize.ts). Dosadí se JEN tam, kde řádek nemá vlastní revizní
+ * zprávu (posledni_revizni_zprava_id) – jakmile se pro něj nahraje skutečný
+ * protokol, ten je závaznější. Řádek si zdroj termínu pamatuje v
+ * "termin_z_protokolu_id", podle něj import plánu termín nepřepíše zpátky
+ * (viz handleSave v app/nahrat/page.tsx). Při víc zdrojích pro stejný druh
+ * vyhrává termín z nejnovější zprávy.
+ */
+async function dosadDalsiTerminy(
+  cisloZarizeni: string,
+  zdroje: Radek[],
+  kolekce: KolekceRevizi
+): Promise<void> {
+  const cile = new Map<string, { termin: Date; zdrojId: string }>();
+  const odNejstarsiho = [...zdroje].sort(
+    (a, b) => a.datumProvedeni.getTime() - b.datumProvedeni.getTime()
+  );
+  for (const zdroj of odNejstarsiho) {
+    const polozky = zdroj.snap.data().dalsi_terminy;
+    if (!Array.isArray(polozky)) continue;
+    for (const polozka of polozky) {
+      if (!jeDruhRevize(polozka?.druh) || !(polozka?.termin instanceof Timestamp)) continue;
+      cile.set(polozka.druh, { termin: polozka.termin.toDate(), zdrojId: zdroj.snap.id });
+    }
+  }
+  if (cile.size === 0) return;
+
+  const planSnap = await getDocs(
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
+  );
+  for (const [druh, { termin, zdrojId }] of cile) {
+    const kandidati = planSnap.docs.filter((d) =>
+      planOdpovidaDruhu(d.data().frekvence, druh as DruhRevize)
+    );
+    if (kandidati.length !== 1) continue;
+    if (typeof kandidati[0].data().posledni_revizni_zprava_id === "string") continue;
+    await updateDoc(kandidati[0].ref, {
+      termin: Timestamp.fromDate(termin),
+      stav: "cekajici",
+      termin_z_protokolu_id: zdrojId,
+    });
+  }
 }
 
 async function synchronizujPlanovanouRevizi(
@@ -277,6 +330,9 @@ async function synchronizujPlanovanouRevizi(
     posledni_revize_vcas: posledniRevizeVcas,
     posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
+    // Řádek má teď vlastní revizní zprávu, termín dosazený z protokolu jiného
+    // druhu (viz dosadDalsiTerminy) už neplatí.
+    termin_z_protokolu_id: null,
     vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
     zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
     predchozi_revizni_zprava_url: predchozi ? predchozi.snap.data().pdf_url ?? null : null,

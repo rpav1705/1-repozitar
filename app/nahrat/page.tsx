@@ -249,7 +249,12 @@ function PlanUpload() {
       const existingSnap = await getDocs(col);
       const maTerminZRevizniZpravy = new Set(
         existingSnap.docs
-          .filter((d) => typeof d.data().posledni_revizni_zprava_id === "string")
+          .filter(
+            (d) =>
+              typeof d.data().posledni_revizni_zprava_id === "string" ||
+              // Termín dosazený z protokolu jiného druhu revize (viz dosadDalsiTerminy).
+              typeof d.data().termin_z_protokolu_id === "string"
+          )
           .map((d) => d.id)
       );
       // Pro rozlišení "přidáno" vs. "aktualizováno" v log záznamu (viz

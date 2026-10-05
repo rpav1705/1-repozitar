@@ -20,6 +20,9 @@ import { OcrEngine, ocrRadkyStranky, vytvorOcr } from "./ocrStranky";
  */
 export type VysledekRevize = "OK" | "NOK" | "KE_KONTROLE";
 
+/** Termín příští revize JINÉHO druhu, který protokol uvádí navíc (viz extractDalsiTerminyTlakovaNadoba). */
+export type DalsiTermin = { druh: DruhRevize; termin: Date };
+
 export type ParsedRevizniZprava = {
   cislo_zarizeni: string;
   datum_provedeni: Date;
@@ -50,6 +53,13 @@ export type ParsedRevizniZprava = {
    * U ostatních šablon chybí/null.
    */
   druh_revize?: DruhRevize | null;
+  /**
+   * Další naplánované revize jiných druhů uvedené v téže zprávě (např.
+   * "následující zkouška těsnosti: 11/2030" v provozní revizi) – appka je
+   * dosadí jako termín odpovídajícího řádku plánu (viz
+   * lib/revizniZpravyHistorie.ts), pokud ten nemá vlastní revizní zprávu.
+   */
+  dalsi_terminy?: DalsiTermin[];
 };
 
 /**
@@ -994,6 +1004,43 @@ function extractTerminTlakovaNadoba(lines: string[]): Date | null {
   return match ? parseTerminHodnota(match[1].replace(/\s+/g, "")) : null;
 }
 
+// Fráze "následující …: MM/RRRR" a řádek plánu (frekvence), na který patří.
+// "Zkouška těsnosti" je u tlakových nádob (akumulátory) pětiletá kontrola,
+// stejně jako vnitřní revize.
+const NASLEDUJICI_TERMINY: { popisek: string; druh: DruhRevize }[] = [
+  { popisek: "vnitřní revize", druh: "vnitrni" },
+  { popisek: "zkouška těsnosti", druh: "vnitrni" },
+  { popisek: "tlaková zkouška", druh: "zkouska" },
+  { popisek: "provozní revize", druh: "provozni" },
+];
+
+/**
+ * "Platnost revizní zprávy je do 4/2027     následující zkouška těsnosti:
+ * 11/2030" – termín příští revize JINÉHO druhu, než jaký zpráva sama řeší.
+ * Měsíc/rok se bere jako poslední den měsíce (stejně jako u hlavního termínu).
+ */
+function extractDalsiTerminyTlakovaNadoba(
+  lines: string[],
+  druhZpravy: DruhRevize | null
+): DalsiTermin[] {
+  const text = spojRadky(lines);
+  const vysledek: DalsiTermin[] = [];
+  for (const { popisek, druh } of NASLEDUJICI_TERMINY) {
+    if (druh === druhZpravy || vysledek.some((v) => v.druh === druh)) continue;
+    const match = text.match(
+      new RegExp(
+        fuzzyD("následující " + popisek) +
+          ":?\\s*(\\d{1,2}\\s*/\\s*\\d{2,4}|\\d{1,2}\\s*\\.\\s*\\d{1,2}\\s*\\.\\s*\\d{4})",
+        "i"
+      )
+    );
+    if (!match) continue;
+    const termin = parseTerminHodnota(match[1].replace(/\s+/g, ""));
+    if (termin) vysledek.push({ druh, termin });
+  }
+  return vysledek;
+}
+
 function extractDruhRevizeTlakovaNadoba(lines: string[]): DruhRevize | null {
   const raw = hodnotaZaPopiskem(lines, "Druh revize:");
   if (!raw) return null;
@@ -1132,14 +1179,16 @@ function extractTechnikTlakovaNadoba(lines: string[]): {
 
 function extractTlakovaNadobaZprava(lines: string[]) {
   const { vysledek_revize, zjistena_zavada, celkove_hodnoceni } = extractVysledekTlakovaNadoba(lines);
+  const druh_revize = extractDruhRevizeTlakovaNadoba(lines);
   return {
+    dalsi_terminy: extractDalsiTerminyTlakovaNadoba(lines, druh_revize),
     cislo_zarizeni: extractCisloZarizeniTlakovaNadoba(lines),
     datum_provedeni: extractDatumProvedeniTlakovaNadoba(lines),
     novy_termin: extractTerminTlakovaNadoba(lines),
     celkove_hodnoceni,
     vysledek_revize,
     zjistena_zavada,
-    druh_revize: extractDruhRevizeTlakovaNadoba(lines),
+    druh_revize,
     ...extractTechnikTlakovaNadoba(lines),
   };
 }
@@ -1357,6 +1406,14 @@ export async function parseRevizniZpravyPdf(
           technik_cislo_opravneni: extracted.technik_cislo_opravneni,
           stranka,
           druh_revize: extracted.druh_revize,
+          // Jen věrohodné další termíny (po datu revize, nejvýš 11 let) – OCR
+          // může číslici přečíst chybně a termín se zapisuje do plánu.
+          dalsi_terminy: extracted.dalsi_terminy.filter(
+            (t) =>
+              extracted.datum_provedeni !== null &&
+              t.termin > extracted.datum_provedeni &&
+              t.termin.getUTCFullYear() - extracted.datum_provedeni.getUTCFullYear() <= 11
+          ),
         });
         stranka += pocetStran;
         continue;

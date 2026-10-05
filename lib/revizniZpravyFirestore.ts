@@ -27,6 +27,16 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
     // Jen u zpráv, které druh revize uvádějí (tlakové nádoby) – elektro
     // dokumenty zůstávají beze změny, bez nového pole.
     ...(zprava.druh_revize ? { druh_revize: zprava.druh_revize } : {}),
+    // Další naplánované revize jiných druhů uvedené v protokolu – viz
+    // dosadDalsiTerminy v lib/revizniZpravyHistorie.ts.
+    ...(zprava.dalsi_terminy && zprava.dalsi_terminy.length > 0
+      ? {
+          dalsi_terminy: zprava.dalsi_terminy.map((t) => ({
+            druh: t.druh,
+            termin: Timestamp.fromDate(t.termin),
+          })),
+        }
+      : {}),
   };
 }
 
