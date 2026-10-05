@@ -43,6 +43,8 @@ import {
 import { describeSaveError } from "@/lib/friendlyError";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
+import { KolekceRevizi } from "@/lib/typRevize";
+import { useTypRevize } from "@/lib/TypRevizeContext";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
@@ -166,6 +168,7 @@ function ZamekBanner() {
 
 function PlanUpload() {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [file, setFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedPlanRow[]>([]);
   const [skipped, setSkipped] = useState<ParseSkip[]>([]);
@@ -230,7 +233,7 @@ function PlanUpload() {
     setSavedCount(0);
     setNeaktivniVysledek(null);
     try {
-      const col = collection(db, "planovane_revize");
+      const col = collection(db, kolekce.plan);
 
       // Termín z .xls plánu je jen informativní/orientační, dokud k zařízení
       // není zpracovaná revizní zpráva (PDF) – ten termín je závazný a NESMÍ
@@ -313,7 +316,7 @@ function PlanUpload() {
           bezPu += 1;
           continue;
         }
-        const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni);
+        const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni, kolekce);
         if (vysledek.planSmazan) {
           planSmazano += 1;
           smazanoList.push(row.cislo_zarizeni);
@@ -343,12 +346,15 @@ function PlanUpload() {
       // zařízení, než si toho někdo stihl všimnout. Appka žádné zálohy ani
       // point-in-time recovery nemá, takže se to nedalo jednoduše vrátit.
       try {
-        await zapisPlanImportLog({
-          pridano: pridanoList,
-          aktualizovano: aktualizovanoList,
-          smazano: smazanoList,
-          smazano_zmizele: [],
-        });
+        await zapisPlanImportLog(
+          {
+            pridano: pridanoList,
+            aktualizovano: aktualizovanoList,
+            smazano: smazanoList,
+            smazano_zmizele: [],
+          },
+          kolekce
+        );
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
         // neblokuje samotný (už úspěšně dokončený) import.
@@ -611,6 +617,7 @@ function pluralizeSoubor(count: number): string {
 
 function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -680,14 +687,14 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
           // Rozdělení jednotlivých stránek do samostatných PDF by vyžadovalo další
           // knihovnu – ukládáme proto celý nahraný soubor jednou a každá z něj
           // rozpoznaná revizní zpráva na něj odkazuje i s číslem stránky.
-          const storagePath = `revizni_zpravy/${Date.now()}_${sanitizeStoragePathSegment(file.name)}`;
+          const storagePath = `${kolekce.storagePrefix}/${Date.now()}_${sanitizeStoragePathSegment(file.name)}`;
           const fileRef = ref(storage, storagePath);
           await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
           const pdf_url = await getDownloadURL(fileRef);
 
           for (const zprava of zpravy) {
             const planQuery = query(
-              collection(db, "planovane_revize"),
+              collection(db, kolekce.plan),
               where("cislo_zarizeni", "==", zprava.cislo_zarizeni)
             );
             const matchSnap = await getDocs(planQuery);
@@ -717,8 +724,8 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             // revizniZpravaDocId a dedup v lib/revizniZpravyHistorie.ts).
             const zpravaId = revizniZpravaDocId(zprava.cislo_zarizeni, zprava.datum_provedeni);
             const zpravaRef = zpravaId
-              ? doc(db, "revizni_zpravy", zpravaId)
-              : doc(collection(db, "revizni_zpravy"));
+              ? doc(db, kolekce.zpravy, zpravaId)
+              : doc(collection(db, kolekce.zpravy));
             await setDoc(zpravaRef, {
               ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
@@ -784,9 +791,9 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
     let finalizeDone = 0;
     const overenyTerminByZarizeni = new Map<string, Date | null>();
     for (const cislo of dotcenaZarizeni) {
-      await synchronizujHistoriiZarizeni(cislo);
+      await synchronizujHistoriiZarizeni(cislo, kolekce);
       const planSnap = await getDocs(
-        query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cislo))
+        query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cislo))
       );
       if (planSnap.docs.length === 1) {
         const t = planSnap.docs[0].data().termin;
@@ -803,12 +810,15 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
 
     if (allProcessed.length > 0 || allSkipped.length > 0) {
       try {
-        await zapisRevizniZpravyImportLog({
-          zdroj: "nahrani",
-          zpracovano: allProcessed.length,
-          chyba: allSkipped.length,
-          zarizeni: Array.from(dotcenaZarizeni),
-        });
+        await zapisRevizniZpravyImportLog(
+          {
+            zdroj: "nahrani",
+            zpracovano: allProcessed.length,
+            chyba: allSkipped.length,
+            zarizeni: Array.from(dotcenaZarizeni),
+          },
+          kolekce
+        );
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
         // neblokuje samotné (už úspěšně dokončené) zpracování.
@@ -1149,6 +1159,15 @@ let bezicíZpracovani: { rezim: ReprocessMod; zacatek: Date } | null = null;
 // úspěšně zpracované zprávě, ne až na konci.
 const REPROCESS_CHECKPOINT_KEY = "revizniZpravyReprocessCheckpoint";
 
+// Každý druh revizí (viz lib/typRevize.ts) má vlastní checkpoint – ID zpráv z
+// jednoho druhu nesmí appka použít při zpracování jiného. Elektro drží
+// PŮVODNÍ klíč, ať se případný už rozdělaný checkpoint neztratí.
+function reprocessCheckpointKey(kolekce: KolekceRevizi): string {
+  return kolekce.typ === "elektro"
+    ? REPROCESS_CHECKPOINT_KEY
+    : `${REPROCESS_CHECKPOINT_KEY}_${kolekce.typ}`;
+}
+
 type ReprocessCheckpoint = {
   mod: ReprocessMod;
   /** ID dokumentů "revizni_zpravy", které tenhle běh (i přes případná
@@ -1160,9 +1179,9 @@ type ReprocessCheckpoint = {
   aktualizovano: string;
 };
 
-function nacistReprocessCheckpoint(): ReprocessCheckpoint | null {
+function nacistReprocessCheckpoint(kolekce: KolekceRevizi): ReprocessCheckpoint | null {
   try {
-    const raw = localStorage.getItem(REPROCESS_CHECKPOINT_KEY);
+    const raw = localStorage.getItem(reprocessCheckpointKey(kolekce));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (
@@ -1180,9 +1199,9 @@ function nacistReprocessCheckpoint(): ReprocessCheckpoint | null {
   }
 }
 
-function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint) {
+function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint, kolekce: KolekceRevizi) {
   try {
-    localStorage.setItem(REPROCESS_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+    localStorage.setItem(reprocessCheckpointKey(kolekce), JSON.stringify(checkpoint));
   } catch {
     // localStorage může být nedostupný (soukromé okno, zakázané úložiště…) –
     // checkpoint se prostě neuloží. Přerušení/pokračování přes zavření karty
@@ -1190,9 +1209,9 @@ function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint) {
   }
 }
 
-function smazatReprocessCheckpoint() {
+function smazatReprocessCheckpoint(kolekce: KolekceRevizi) {
   try {
-    localStorage.removeItem(REPROCESS_CHECKPOINT_KEY);
+    localStorage.removeItem(reprocessCheckpointKey(kolekce));
   } catch {
     // viz ulozitReprocessCheckpoint
   }
@@ -1230,6 +1249,7 @@ function smazatReprocessCheckpoint() {
  */
 function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
   // jen pro popisky v UI (progress text, souhrn), na volbu dávky uvnitř
@@ -1274,13 +1294,13 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
   const nacistPocty = async () => {
     try {
-      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      const snap = await getDocs(collection(db, kolekce.zpravy));
       const aktualni = vyberAktualniZpravy(snap.docs);
       const nove = aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       setPocetVse(aktualni.length);
       setPocetNove(nove.length);
 
-      const cp = nacistReprocessCheckpoint();
+      const cp = nacistReprocessCheckpoint(kolekce);
       if (cp) {
         const cilova = cp.mod === "vse" ? aktualni : nove;
         const hotoveSet = new Set(cp.hotoveIds);
@@ -1290,7 +1310,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         } else {
           // Poslední zbývající zprávy mezitím zpracoval/smazal někdo jiný
           // (jiná karta, jiný běh) – checkpoint je tak fakticky hotový.
-          smazatReprocessCheckpoint();
+          smazatReprocessCheckpoint(kolekce);
           setCheckpoint(null);
         }
       } else {
@@ -1349,7 +1369,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
     }
     const heartbeatId = zahajHeartbeat();
 
-    const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint() : null;
+    const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint(kolekce) : null;
     // Pokračování dává smysl jen se stejným režimem, jaký checkpoint měl -
     // jinak (nebo když se nepokračuje) se prostě začíná s prázdným setem
     // hotových ID, jako dřív.
@@ -1371,7 +1391,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
     bezicíZpracovani = { rezim: mod, zacatek: new Date() };
     try {
-      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      const snap = await getDocs(collection(db, kolekce.zpravy));
       const aktualni = vyberAktualniZpravy(snap.docs);
       const cilova = mod === "vse" ? aktualni : aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       // Zbývající = cílová dávka MINUS to, co už (i z dřívějšího přerušeného
@@ -1501,11 +1521,14 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               // zprávě (ne až na konci) – ať přerušení/pád prohlížeče
               // uprostřed běhu neztratí rozdělanou práci.
               hotoveIdsRunning.add(docSnap.id);
-              ulozitReprocessCheckpoint({
-                mod,
-                hotoveIds: Array.from(hotoveIdsRunning),
-                aktualizovano: new Date().toISOString(),
-              });
+              ulozitReprocessCheckpoint(
+                {
+                  mod,
+                  hotoveIds: Array.from(hotoveIdsRunning),
+                  aktualizovano: new Date().toISOString(),
+                },
+                kolekce
+              );
 
               // Dosazení do plánu (a případné prořezání starší historie) se
               // řeší až po přepočítání úplně všech zpráv, viz
@@ -1614,7 +1637,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         while (nextPruneIndex < zarizeniList.length) {
           const cislo = zarizeniList[nextPruneIndex];
           nextPruneIndex += 1;
-          const vysledek = await synchronizujHistoriiZarizeni(cislo);
+          const vysledek = await synchronizujHistoriiZarizeni(cislo, kolekce);
           if (vysledek.smazanoZaznamu > 0) souhrn.zarizeniSMazanim += 1;
           souhrn.smazanoZaznamu += vysledek.smazanoZaznamu;
           souhrn.smazanoSouboru += vysledek.smazanoSouboru;
@@ -1642,12 +1665,15 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
       if (done > 0) {
         try {
-          await zapisRevizniZpravyImportLog({
-            zdroj: mod === "vse" ? "zpracovat_ulozene_vse" : "zpracovat_ulozene_nove",
-            zpracovano: uspesneCount,
-            chyba: chybaCount,
-            zarizeni: Array.from(dotcenaZarizeni),
-          });
+          await zapisRevizniZpravyImportLog(
+            {
+              zdroj: mod === "vse" ? "zpracovat_ulozene_vse" : "zpracovat_ulozene_nove",
+              zpracovano: uspesneCount,
+              chyba: chybaCount,
+              zarizeni: Array.from(dotcenaZarizeni),
+            },
+            kolekce
+          );
         } catch {
           // Log je jen doplňkový přehled na dashboardu – selhání zápisu
           // neblokuje samotné (už úspěšně dokončené/přerušené) zpracování.
@@ -1659,7 +1685,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         // pokračovalo přesně od zbývajících záznamů.
         setStatus("prerusene");
       } else {
-        smazatReprocessCheckpoint();
+        smazatReprocessCheckpoint(kolekce);
         setStatus("done");
       }
       // Prořezání (a případné mezitím nahrané nové zprávy, nebo přerušení)
@@ -1737,7 +1763,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               </button>
               <button
                 onClick={() => {
-                  smazatReprocessCheckpoint();
+                  smazatReprocessCheckpoint(kolekce);
                   setCheckpoint(null);
                 }}
                 className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50"
@@ -2133,6 +2159,7 @@ function AnalyzaTabulkaChybiCislo({
  */
 function NesparovaneZpravySection() {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [stav, setStav] = useState<"idle" | "nacitam" | "hotovo" | "chyba">("idle");
   const [vysledek, setVysledek] = useState<AnalyzaVysledek | null>(null);
   const [chyba, setChyba] = useState("");
@@ -2144,7 +2171,7 @@ function NesparovaneZpravySection() {
     try {
       if (!user) throw new Error("Nejsi přihlášen/a – obnov prosím stránku a přihlas se znovu.");
       const token = await user.getIdToken();
-      const res = await fetch(ANALYZA_NESPAROVANYCH_URL, {
+      const res = await fetch(`${ANALYZA_NESPAROVANYCH_URL}?typ=${encodeURIComponent(kolekce.typ)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       // Nejdřív si přečteme tělo jako text – odpověď serveru se dá takhle
@@ -2289,8 +2316,17 @@ function NesparovaneZpravySection() {
 }
 
 export default function NahratPage() {
+  const { typ } = useTypRevize();
+  // key = druh revizí – při přepnutí se celá stránka přemountuje, ať se
+  // rozpracovaný výběr souborů/náhled/výsledky z jednoho druhu nikdy
+  // nepřenesou do druhého (a omylem se neuložily do špatných kolekcí).
+  return <NahratStranka key={typ} />;
+}
+
+function NahratStranka() {
   const { user } = useAuth();
   const { role } = useUserRole(user);
+  const { kolekce } = useTypRevize();
   // Zvýší se po úspěšném nahrání nových revizních zpráv v RevizniZpravyUpload
   // – RevizniZpravyReprocess si podle něj přepočítá "Ke zpracování: N
   // nových…" (jinak by ten počet zůstal starý, dokud by uživatel stránku
@@ -2305,6 +2341,10 @@ export default function NahratPage() {
           <AppNav role={role} />
 
           <div className="flex flex-col gap-4 px-7 py-6">
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-2.5 text-[12.5px] text-blue-700">
+              Importy a zpracování na téhle stránce se týkají druhu revizí:{" "}
+              <strong>{kolekce.label}</strong> (druh se přepíná vpravo v navigaci).
+            </div>
             <ZamekBanner />
             <PlanUpload />
             <RevizniZpravyUpload onUlozeno={() => setRevizniZpravyReloadKey((k) => k + 1)} />

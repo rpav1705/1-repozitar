@@ -1,14 +1,15 @@
 import { addDoc, collection, Timestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { KolekceRevizi } from "@/lib/typRevize";
 
 /**
  * Kolektor historie importů/zpracování – jeden záznam PER běh (import plánu
  * .xls, nebo jedno spuštění zpracování revizních zpráv), ať dashboard umí
  * ukázat "poslední import" karty bez nutnosti to dopočítávat z aktuálního
  * stavu dat (ten totiž neříká NIC o tom, kdy a s jakým výsledkem proběhl
- * poslední běh – jen jaký je výsledný stav teď).
+ * poslední běh – jen jaký je výsledný stav teď). Kolekci logu si každý druh
+ * revizí vede vlastní (viz KolekceRevizi.log v lib/typRevize.ts).
  */
-export const IMPORT_LOG_COLLECTION = "import_log";
 
 /**
  * Kolik čísel zařízení appka u jedné položky logu maximálně uloží do
@@ -44,8 +45,11 @@ export type PlanImportLogInput = {
  * PlanUpload (app/nahrat/page.tsx) PO úspěšném dokončení importu (včetně
  * úklidu neaktivních zařízení).
  */
-export async function zapisPlanImportLog(input: PlanImportLogInput): Promise<void> {
-  await addDoc(collection(db, IMPORT_LOG_COLLECTION), {
+export async function zapisPlanImportLog(
+  input: PlanImportLogInput,
+  kolekce: KolekceRevizi
+): Promise<void> {
+  await addDoc(collection(db, kolekce.log), {
     typ: "plan",
     cas: Timestamp.fromDate(new Date()),
     pocty: {
@@ -89,9 +93,10 @@ export type RevizniZpravyImportLogInput = {
  * obě tlačítka v RevizniZpravyReprocess ("jen nové" i "úplně vše").
  */
 export async function zapisRevizniZpravyImportLog(
-  input: RevizniZpravyImportLogInput
+  input: RevizniZpravyImportLogInput,
+  kolekce: KolekceRevizi
 ): Promise<void> {
-  await addDoc(collection(db, IMPORT_LOG_COLLECTION), {
+  await addDoc(collection(db, kolekce.log), {
     typ: "revizni_zpravy",
     cas: Timestamp.fromDate(new Date()),
     zdroj: input.zdroj,

@@ -14,6 +14,7 @@ import {
 import { deleteObject, ref } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
 import { REPROCESS_MARKER_FIELD } from "@/lib/revizniZpravyFirestore";
+import { KolekceRevizi } from "@/lib/typRevize";
 
 /**
  * Kolik posledních revizních zpráv (podle "datum_provedeni", sestupně) appka
@@ -107,7 +108,8 @@ function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[
  * smazNeaktivniZarizeni (mazání úplně všech zpráv zařízení).
  */
 async function smazZpravy(
-  docs: QueryDocumentSnapshot<DocumentData>[]
+  docs: QueryDocumentSnapshot<DocumentData>[],
+  kolekce: KolekceRevizi
 ): Promise<{ smazanoZaznamu: number; smazanoSouboru: number }> {
   let smazanoZaznamu = 0;
   let smazanoSouboru = 0;
@@ -121,7 +123,7 @@ async function smazZpravy(
 
     if (path) {
       const jesteUzito = await getDocs(
-        query(collection(db, "revizni_zpravy"), where("pdf_storage_path", "==", path))
+        query(collection(db, kolekce.zpravy), where("pdf_storage_path", "==", path))
       );
       if (jesteUzito.empty) {
         try {
@@ -160,10 +162,11 @@ async function smazZpravy(
  * uložených datech.
  */
 export async function synchronizujHistoriiZarizeni(
-  cisloZarizeni: string
+  cisloZarizeni: string,
+  kolekce: KolekceRevizi
 ): Promise<VysledekSynchronizace> {
   const revSnap = await getDocs(
-    query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.zpravy), where("cislo_zarizeni", "==", cisloZarizeni))
   );
 
   const vsechnyRadky: Radek[] = revSnap.docs
@@ -179,20 +182,24 @@ export async function synchronizujHistoriiZarizeni(
   const ponechane = radky.slice(0, HISTORIE_LIMIT);
   const kSmazani = [...radky.slice(HISTORIE_LIMIT), ...duplicitni];
 
-  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(kSmazani.map((r) => r.snap));
-  const planSynchronizovan = await synchronizujPlanovanouRevizi(cisloZarizeni, ponechane);
+  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(
+    kSmazani.map((r) => r.snap),
+    kolekce
+  );
+  const planSynchronizovan = await synchronizujPlanovanouRevizi(cisloZarizeni, ponechane, kolekce);
 
   return { smazanoZaznamu, smazanoSouboru, duplicitSmazano: duplicitni.length, planSynchronizovan };
 }
 
 async function synchronizujPlanovanouRevizi(
   cisloZarizeni: string,
-  ponechane: Radek[]
+  ponechane: Radek[],
+  kolekce: KolekceRevizi
 ): Promise<boolean> {
   if (ponechane.length === 0) return false;
 
   const planSnap = await getDocs(
-    query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
   );
   // Bez shody nebo víc shod (víc typů revize u stejného čísla zařízení) –
   // stejně jako při párování nic automaticky needitujeme.
@@ -274,9 +281,10 @@ export type VysledekMazaniNeaktivniho = {
  */
 export async function smazNeaktivniZarizeni(
   planDocId: string,
-  cisloZarizeni: string
+  cisloZarizeni: string,
+  kolekce: KolekceRevizi
 ): Promise<VysledekMazaniNeaktivniho> {
-  const planRef = doc(db, "planovane_revize", planDocId);
+  const planRef = doc(db, kolekce.plan, planDocId);
   const planSnap = await getDoc(planRef);
   if (!planSnap.exists()) {
     return { planSmazan: false, smazanoZaznamu: 0, smazanoSouboru: 0 };
@@ -285,16 +293,16 @@ export async function smazNeaktivniZarizeni(
   await deleteDoc(planRef);
 
   const zbyleSnap = await getDocs(
-    query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
   );
   if (!zbyleSnap.empty) {
     return { planSmazan: true, smazanoZaznamu: 0, smazanoSouboru: 0 };
   }
 
   const revSnap = await getDocs(
-    query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.zpravy), where("cislo_zarizeni", "==", cisloZarizeni))
   );
-  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(revSnap.docs);
+  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(revSnap.docs, kolekce);
 
   return { planSmazan: true, smazanoZaznamu, smazanoSouboru };
 }

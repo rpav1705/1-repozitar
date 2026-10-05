@@ -28,9 +28,9 @@ import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
 import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
+import { KolekceRevizi } from "@/lib/typRevize";
+import { useTypRevize } from "@/lib/TypRevizeContext";
 
-const PLAN_COLLECTION = "planovane_revize";
-const CENIK_COLLECTION = "cenik";
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
 // bezpečnostní strop, ať jedno načtení nikdy neroztáhne dotaz do nekonečna.
 const TABLE_LIMIT = 5000;
@@ -499,7 +499,7 @@ type DashboardData = {
   rows: PlanRow[];
 };
 
-function useDashboardData() {
+function useDashboardData(kolekce: KolekceRevizi) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -510,13 +510,16 @@ function useDashboardData() {
     async function load() {
       setLoading(true);
       setError("");
+      // Data předchozího druhu revizí se při přepnutí zahodí hned – jinak by
+      // se do dokončení načtení krátce ukazovala data jiného druhu.
+      setData(null);
       try {
         const now = new Date();
         const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const warnUntil = new Date(startOfToday);
         warnUntil.setDate(warnUntil.getDate() + WARN_DAYS);
 
-        const col = collection(db, PLAN_COLLECTION);
+        const col = collection(db, kolekce.plan);
         const startOfTodayTs = Timestamp.fromDate(startOfToday);
         const warnUntilTs = Timestamp.fromDate(warnUntil);
 
@@ -533,7 +536,7 @@ function useDashboardData() {
             getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
             // Ceny appka spáruje podle čísla zařízení (viz app/cenik/page.tsx) –
             // stejný přístup jako u výpočtu měsíčních nákladů tam.
-            getDocs(collection(db, CENIK_COLLECTION)),
+            getDocs(collection(db, kolekce.cenik)),
           ]);
 
         if (cancelled) return;
@@ -617,12 +620,11 @@ function useDashboardData() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kolekce]);
 
   return { data, error, loading, setData };
 }
 
-const IMPORT_LOG_COLLECTION = "import_log";
 // Kolik čísel zařízení appka u rozkliknuté karty ukáže najednou – log
 // záznam jich (viz lib/importLog.ts) může mít uložené až tisíc, ale
 // vypisovat všechny by u velkých dávek zbytečně zatížilo vykreslení.
@@ -689,7 +691,7 @@ function nejnovejsiLogDoc(
   return nejnovejsi;
 }
 
-function useImportLogs() {
+function useImportLogs(kolekce: KolekceRevizi) {
   const [data, setData] = useState<ImportLogsData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -698,8 +700,9 @@ function useImportLogs() {
 
     async function load() {
       setLoading(true);
+      setData(null);
       try {
-        const logCol = collection(db, IMPORT_LOG_COLLECTION);
+        const logCol = collection(db, kolekce.log);
         const [planSnap, revizeSnap] = await Promise.all([
           getDocs(query(logCol, where("typ", "==", "plan"))),
           getDocs(query(logCol, where("typ", "==", "revizni_zpravy"))),
@@ -755,7 +758,7 @@ function useImportLogs() {
           // datum nahrání nejnovější uložené revizní zprávy, ať karta místo
           // "chyba" zobrazí nejlepší dostupnou náhradu (viz bod 4 zadání).
           const fallbackSnap = await getDocs(
-            query(collection(db, "revizni_zpravy"), orderBy("nahrano", "desc"), limit(1))
+            query(collection(db, kolekce.zpravy), orderBy("nahrano", "desc"), limit(1))
           );
           if (cancelled) return;
           const nahrano = fallbackSnap.docs[0]?.data().nahrano;
@@ -774,7 +777,7 @@ function useImportLogs() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kolekce]);
 
   return { data, loading };
 }
@@ -857,8 +860,9 @@ function ImportLogCard({
 }
 
 function DashboardOverview({ userEmail }: { userEmail: string }) {
-  const { data, error, loading, setData } = useDashboardData();
-  const { data: importLogs, loading: importLogsLoading } = useImportLogs();
+  const { kolekce } = useTypRevize();
+  const { data, error, loading, setData } = useDashboardData(kolekce);
+  const { data: importLogs, loading: importLogsLoading } = useImportLogs(kolekce);
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
   const trimmedSearch = searchText.trim();
@@ -908,7 +912,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
    */
   const oznacitOpraveno = async (rowId: string, poznamka: string) => {
     const opravaDatum = new Date();
-    await updateDoc(doc(db, PLAN_COLLECTION, rowId), {
+    await updateDoc(doc(db, kolekce.plan, rowId), {
       oprava_poznamka: poznamka,
       oprava_datum: Timestamp.fromDate(opravaDatum),
       oprava_uzivatel_email: userEmail,
@@ -940,7 +944,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
       throw new Error("Zařízení nemá platné číslo, cenu nelze uložit.");
     }
     await setDoc(
-      doc(db, CENIK_COLLECTION, id),
+      doc(db, kolekce.cenik, id),
       {
         cislo_zarizeni: row.cislo_zarizeni,
         popis: row.popis,
@@ -1422,6 +1426,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
 export default function Home() {
   const { user } = useAuth();
   const { role } = useUserRole(user);
+  const { typ, kolekce } = useTypRevize();
 
   return (
     <AuthGate>
@@ -1432,10 +1437,12 @@ export default function Home() {
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-2.5 text-[12.5px] text-blue-700">
-              Vítej, {user.email}!
+              Vítej, {user.email}! Zobrazené revize: <strong>{kolekce.label}</strong>
             </div>
 
-            <DashboardOverview userEmail={user.email ?? "neznámý uživatel"} />
+            {/* key = druh revizí – při přepnutí se celé přehled přemountuje, ať
+                se nepřenese filtr/hledání/rozbalené karty z jiného druhu. */}
+            <DashboardOverview key={typ} userEmail={user.email ?? "neznámý uživatel"} />
           </div>
         </div>
       )}
