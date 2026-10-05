@@ -79,7 +79,8 @@ export type ParseRevizniZpravyResult = {
 // pdfjs-dist (node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs) – API a
 // worker verze musí přesně sedět, jinak pdf.js odmítne dokument otevřít. Při
 // update balíčku pdfjs-dist je potřeba worker soubor v /public zkopírovat
-// znovu (ze stejné "legacy" varianty, viz import pdfjsLib výš).
+// znovu (ze stejné "legacy" varianty, viz import pdfjsLib výš) – a stejně tak
+// složku public/pdfjs-wasm (node_modules/pdfjs-dist/wasm), viz wasmUrl níž.
 //
 // V Node (scripts/reprocess-all-revizni-zpravy.ts) žádný /pdf.worker.min.mjs
 // server neběží – worker soubor se tam najde přímo v node_modules. "node:module"
@@ -1050,18 +1051,28 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
   return { vysledek_revize, zjistena_zavada, celkove_hodnoceni: vysledekText.slice(0, 300) };
 }
 
-/** Jednopísmenné tokeny po sobě (OCR rozdělené "Š m í d l") se slijí zpět do slova. */
+/**
+ * Vyčistí jméno technika přečtené z textu (OCR razítka kolem podpisu dělají
+ * šum): zahodí vše před poslední interpunkcí ")" ":" ";" a slova psaná samými
+ * velkými písmeny (nápisy razítka), a krátké zlomky po sobě (OCR rozdělené
+ * "Š mí dl" / "Š m í d l") slije zpět do slova.
+ */
 function slijRozdelenaPismena(jmeno: string): string {
-  const tokeny = jmeno.split(/\s+/).filter(Boolean);
+  const bezSumu = jmeno.replace(/^.*[):;]\s*/, "");
+  const tokeny = bezSumu
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !(t.length >= 3 && /^\p{Lu}+$/u.test(t)));
   const vystup: string[] = [];
   let beh: string[] = [];
   const uzavriBeh = () => {
-    if (beh.length >= 3) vystup.push(beh.join(""));
+    const slito = beh.join("");
+    if (beh.length >= 3 || (beh.length >= 2 && slito.length >= 5)) vystup.push(slito);
     else vystup.push(...beh);
     beh = [];
   };
   for (const token of tokeny) {
-    if (/^\p{L}$/u.test(token)) {
+    if (/^\p{L}{1,2}$/u.test(token)) {
       beh.push(token);
     } else {
       uzavriBeh();
@@ -1206,7 +1217,16 @@ export async function parseRevizniZpravyPdf(
   // stovky až tisíce nikdy neuklizených workerů = reálně pozorovaný růst
   // spotřeby paměti karty do jednotek GB. finally zajistí úklid i když
   // parsování/getPage někde uprostřed spadne.
-  const loadingTask = pdfjsLib.getDocument({ data: data.slice(0) });
+  const loadingTask = pdfjsLib.getDocument({
+    data: data.slice(0),
+    // Bez wasmUrl pdf.js v6 nenačte WASM dekodéry (JBIG2/CCITT masky z kopírek,
+    // JPEG2000, ICC profily) a obrázky, které je potřebují, tiše ZAHODÍ
+    // ("JBig2 failed to initialize") – u skenů v režimu vysoké komprese tak
+    // zmizí celý text a OCR čte prázdný podklad. Soubory jsou v
+    // public/pdfjs-wasm (kopie z node_modules/pdfjs-dist/wasm, viz poznámka u
+    // ensureWorker). V Node skriptu se wasmUrl nepoužívá.
+    ...(typeof window !== "undefined" ? { wasmUrl: `${window.location.origin}/pdfjs-wasm/` } : {}),
+  });
   const ocrEngineRef: { current: OcrEngine | null } = { current: null };
   try {
     const doc = await loadingTask.promise;
