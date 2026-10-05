@@ -680,7 +680,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
     for (const file of files) {
       try {
         const buffer = await file.arrayBuffer();
-        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer);
+        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
 
         for (const p of preskoceno) {
           allSkipped.push({ soubor: file.name, stranka: p.stranka, duvod: p.duvod });
@@ -882,6 +882,14 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
           podle pole <code className="rounded bg-gray-100 px-1 py-0.5">cislo_zarizeni</code>) a uloží
           se do kolekce <code className="rounded bg-gray-100 px-1 py-0.5">revizni_zpravy</code>.
         </p>
+        {kolekce.ocr && (
+          <p className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-[12.5px] text-orange-800">
+            U druhu <strong>{kolekce.label}</strong> appka naskenované PDF (bez textové vrstvy) čte
+            pomocí OCR. První spuštění stáhne jazykový model (cca 7 MB) a přečtení jedné stránky
+            trvá desítky sekund – nech kartu otevřenou. OCR může číslici přečíst chybně, proto si
+            přečtené údaje v tabulce po zpracování zkontroluj.
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
@@ -1497,7 +1505,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         let downloadError = "";
         try {
           const buffer = await getBytes(ref(storage, storagePath));
-          const { zpravy } = await parseRevizniZpravyPdf(buffer);
+          const { zpravy } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
           freshByStranka = new Map(zpravy.map((z) => [z.stranka, z]));
         } catch (err) {
           downloadError =

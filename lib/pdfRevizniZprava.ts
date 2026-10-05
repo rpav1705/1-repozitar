@@ -9,6 +9,7 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import { parseFlexibleDate } from "./parseDate";
 import { yieldToMainThread } from "./yieldToMainThread";
 import { DruhRevize } from "./druhRevize";
+import { OcrEngine, ocrRadkyStranky, vytvorOcr } from "./ocrStranky";
 
 /**
  * Klasifikace "celkove_hodnoceni" do tří stavů – appka nikdy nemá jistě
@@ -918,9 +919,28 @@ function extractObjektZprava(lines: string[]) {
 // fuzzy a hodnoty tolerantní.
 // ---------------------------------------------------------------------------
 
+// České znaky s diakritikou -> třída povolující i variantu bez ní (OCR háčky a
+// čárky často ztrácí nebo zamění).
+const DIAKRITIKA_TRIDY: Record<string, string> = {
+  á: "aá", č: "cč", ď: "dď", é: "eéě", ě: "eéě", í: "ií", ň: "nň", ó: "oó",
+  ř: "rř", š: "sš", ť: "tť", ú: "uúů", ů: "uúů", ý: "yý", ž: "zž",
+};
+
+/** Jako fuzzy(), navíc každý znak s diakritikou povolí i bez ní (viz DIAKRITIKA_TRIDY). */
+function fuzzyD(label: string): string {
+  return label
+    .replace(/\s+/g, "")
+    .split("")
+    .map((ch) => {
+      const trida = DIAKRITIKA_TRIDY[ch.toLowerCase()];
+      return (trida ? `[${trida}]` : escapeRegExpChar(ch)) + "\\s*";
+    })
+    .join("");
+}
+
 /** Hodnota za popiskem na stejném řádku, nebo (když je za popiskem prázdno) první neprázdný řádek pod ním. */
 function hodnotaZaPopiskem(lines: string[], label: string): string | null {
-  const re = new RegExp(fuzzy(label) + "(.*)", "i");
+  const re = new RegExp(fuzzyD(label) + "(.*)", "i");
   for (let i = 0; i < lines.length; i++) {
     const match = lines[i].match(re);
     if (!match) continue;
@@ -944,7 +964,7 @@ function spojRadky(lines: string[]): string {
 function extractCisloZarizeniTlakovaNadoba(lines: string[]): string | null {
   const text = lines.join(" ");
   const vzory = [
-    new RegExp(fuzzy("označení") + ":?\\s*T\\s*N\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
+    new RegExp(fuzzyD("označení") + ":?\\s*T\\s*N\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
     /\bT\s?N\s?[-–]?\s?([\dOo]{2,4})\b/,
   ];
   for (const vzor of vzory) {
@@ -999,21 +1019,21 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
   celkove_hodnoceni: string;
 } {
   const text = spojRadky(lines);
-  const upozorneni = fuzzy("UPOZORNĚNÍ");
+  const upozorneni = fuzzyD("UPOZORNĚNÍ");
   const vysledekMatch = text.match(
     new RegExp(
-      fuzzy("Výsledek revize:") + "(.*?)(?:" + fuzzy("Termín odstranění závad") + "|" + upozorneni + "|$)",
+      fuzzyD("Výsledek revize:") + "(.*?)(?:" + fuzzyD("Termín odstranění závad") + "|" + upozorneni + "|$)",
       "i"
     )
   );
   const vysledekText = vysledekMatch ? vysledekMatch[1].trim() : "";
   const zavadyMatch = text.match(
-    new RegExp(fuzzy("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + upozorneni + "|$)", "i")
+    new RegExp(fuzzyD("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + upozorneni + "|$)", "i")
   );
   const zavadyText = zavadyMatch ? zavadyMatch[1].trim().slice(0, 200) : "";
   const zavadyPrazdne = /^[-–—.\s]*$/.test(zavadyText);
 
-  const jePozitivni = new RegExp(fuzzy("schopen dalšího bezpečného provozu"), "i").test(vysledekText);
+  const jePozitivni = new RegExp(fuzzyD("schopen dalšího bezpečného provozu"), "i").test(vysledekText);
   const jeNegativni = /nen[ií]\s*schopen|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(vysledekText);
 
   let vysledek_revize: VysledekRevize = "KE_KONTROLE";
@@ -1096,8 +1116,8 @@ function extractTlakovaNadobaZprava(lines: string[]) {
 /** Titulní stránka zprávy o revizi tlakové nádoby (další stránky téže zprávy titulek nemají). */
 function jeTitulniStrankaTlakoveNadoby(text: string): boolean {
   return (
-    new RegExp(fuzzy("revizi tlakové nádoby"), "i").test(text) &&
-    new RegExp(fuzzy("revizní zpráva"), "i").test(text)
+    new RegExp(fuzzyD("revizi tlakové nádoby"), "i").test(text) &&
+    new RegExp(fuzzyD("revizní zpráva"), "i").test(text)
   );
 }
 
@@ -1164,7 +1184,10 @@ function detectSablona(lines: string[]): Sablona | null {
  * čtyři reálně ověřené šablony revizních zpráv (viz detectSablona výše) a
  * stránky neodpovídající žádné z nich přeskočí se srozumitelným důvodem.
  */
-export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRevizniZpravyResult> {
+export async function parseRevizniZpravyPdf(
+  data: ArrayBuffer,
+  moznosti: { ocr?: boolean } = {}
+): Promise<ParseRevizniZpravyResult> {
   await ensureWorker();
 
   // getDocument() převezme vlastnictví předaného ArrayBufferu a přesune ho
@@ -1184,10 +1207,24 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
   // spotřeby paměti karty do jednotek GB. finally zajistí úklid i když
   // parsování/getPage někde uprostřed spadne.
   const loadingTask = pdfjsLib.getDocument({ data: data.slice(0) });
+  const ocrEngineRef: { current: OcrEngine | null } = { current: null };
   try {
     const doc = await loadingTask.promise;
     const zpravy: ParsedRevizniZprava[] = [];
     const preskoceno: SkippedPage[] = [];
+
+    // OCR se spouští JEN u stránky, ze které pdf.js nepřečetl žádný text
+    // (naskenovaný protokol), jen v prohlížeči a jen když to volající zapnul
+    // (viz KolekceRevizi.ocr). Engine se vytvoří až při první takové stránce
+    // a sdílí se pro celý soubor; uklízí se ve finally níž.
+    const radkyStranky = async (cislo: number): Promise<string[]> => {
+      const page = await doc.getPage(cislo);
+      const content = await page.getTextContent();
+      const radky = reconstructLines(content.items);
+      if (radky.length > 0 || !moznosti.ocr || typeof window === "undefined") return radky;
+      if (!ocrEngineRef.current) ocrEngineRef.current = await vytvorOcr();
+      return ocrRadkyStranky(page, ocrEngineRef.current);
+    };
 
     let stranka = 1;
     while (stranka <= doc.numPages) {
@@ -1200,9 +1237,7 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
         await yieldToMainThread();
       }
 
-      const page = await doc.getPage(stranka);
-      const content = await page.getTextContent();
-      const lines = reconstructLines(content.items);
+      const lines = await radkyStranky(stranka);
 
       const sablona = detectSablona(lines);
       if (!sablona) {
@@ -1227,9 +1262,7 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
         let pocetStran = 1;
         const vsechnyRadky = [...lines];
         while (stranka + pocetStran <= doc.numPages) {
-          const dalsiPage = await doc.getPage(stranka + pocetStran);
-          const dalsiContent = await dalsiPage.getTextContent();
-          const dalsiRadky = reconstructLines(dalsiContent.items);
+          const dalsiRadky = await radkyStranky(stranka + pocetStran);
           if (jeTitulniStrankaTlakoveNadoby(dalsiRadky.join("\n"))) break;
           vsechnyRadky.push(...dalsiRadky);
           pocetStran += 1;
@@ -1257,6 +1290,19 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
         }
         if (!extracted.novy_termin) {
           preskocit("rozpoznat termín příští revize (Platnost … je do …)");
+          continue;
+        }
+        // Kontrola věrohodnosti – text z OCR může číslici přečíst chybně a
+        // zpráva se hned zapisuje do plánu, proto appka nesmyslná data raději
+        // přeskočí (s náhledem přečteného textu), než aby je uložila.
+        const rokProvedeni = extracted.datum_provedeni.getUTCFullYear();
+        if (rokProvedeni < 2000 || rokProvedeni > new Date().getUTCFullYear() + 1) {
+          preskocit(`věrohodně přečíst datum revize (přečteno rok ${rokProvedeni} – možná chyba OCR)`);
+          continue;
+        }
+        const rozdilLet = extracted.novy_termin.getUTCFullYear() - rokProvedeni;
+        if (extracted.novy_termin <= extracted.datum_provedeni || rozdilLet > 11) {
+          preskocit("věrohodně přečíst termín příští revize (nesedí k datu revize – možná chyba OCR)");
           continue;
         }
 
@@ -1428,6 +1474,7 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
 
     return { zpravy, preskoceno };
   } finally {
+    if (ocrEngineRef.current) await ocrEngineRef.current.ukonci();
     await loadingTask.destroy();
   }
 }

@@ -31,6 +31,12 @@ export type KolekceRevizi = {
    * pravidla Storage jako na elektro revize.
    */
   storagePrefix: string;
+  /**
+   * Jestli appka u PDF stránek bez textové vrstvy (skeny) zkusí OCR. Zapnuto
+   * u druhů, jejichž protokoly bývají naskenované – OCR je pomalé a stahuje
+   * jazykový model, proto je u ostatních druhů vypnuté.
+   */
+  ocr: boolean;
 };
 
 const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
@@ -42,6 +48,7 @@ const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
     log: "import_log",
     cenik: "cenik",
     storagePrefix: "revizni_zpravy",
+    ocr: false,
   },
   tlakove_nadoby: {
     typ: "tlakove_nadoby",
@@ -51,6 +58,7 @@ const KOLEKCE_TYPU: Record<TypRevize, KolekceRevizi> = {
     log: "import_log_tlakove_nadoby",
     cenik: "cenik_tlakove_nadoby",
     storagePrefix: "revizni_zpravy/tlakove_nadoby",
+    ocr: true,
   },
 };
 
