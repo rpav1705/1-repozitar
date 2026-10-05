@@ -56,8 +56,11 @@ export async function GET(request: NextRequest) {
     const db = ziskejAdminFirestore();
 
     const [zpravySnap, planySnap] = await Promise.all([
-      db.collection(kolekce.zpravy).select("cislo_zarizeni", "soubor_nazev", "stranka").get(),
-      db.collection(kolekce.plan).select("cislo_zarizeni", "pu").get(),
+      db
+        .collection(kolekce.zpravy)
+        .select("cislo_zarizeni", "soubor_nazev", "stranka", "druh_revize")
+        .get(),
+      db.collection(kolekce.plan).select("cislo_zarizeni", "pu", "frekvence").get(),
     ]);
 
     const zpravy: RevizniZpravaRadek[] = zpravySnap.docs.map((d) => {
@@ -66,6 +69,7 @@ export async function GET(request: NextRequest) {
         cislo_zarizeni: typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "",
         soubor_nazev: typeof data.soubor_nazev === "string" ? data.soubor_nazev : "",
         stranka: typeof data.stranka === "number" ? data.stranka : 0,
+        druh_revize: typeof data.druh_revize === "string" ? data.druh_revize : null,
       };
     });
 
@@ -74,6 +78,7 @@ export async function GET(request: NextRequest) {
       return {
         cislo_zarizeni: typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "",
         pu: typeof data.pu === "string" ? data.pu : "",
+        frekvence: typeof data.frekvence === "number" ? data.frekvence : null,
       };
     });
 

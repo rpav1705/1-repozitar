@@ -8,6 +8,7 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import { parseFlexibleDate } from "./parseDate";
 import { yieldToMainThread } from "./yieldToMainThread";
+import { DruhRevize } from "./druhRevize";
 
 /**
  * Klasifikace "celkove_hodnoceni" do tří stavů – appka nikdy nemá jistě
@@ -41,6 +42,13 @@ export type ParsedRevizniZprava = {
   technik_cislo_opravneni: string | null;
   /** 1-based číslo stránky uvnitř nahraného PDF. */
   stranka: number;
+  /**
+   * Druh revize (provozní/vnitřní/tlaková zkouška), pokud ho zpráva uvádí –
+   * zatím jen u tlakových nádob (viz šablona E). Podle něj appka zprávu
+   * spáruje s řádkem plánu odpovídající frekvence (viz lib/druhRevize.ts).
+   * U ostatních šablon chybí/null.
+   */
+  druh_revize?: DruhRevize | null;
 };
 
 /**
@@ -900,7 +908,207 @@ function extractObjektZprava(lines: string[]) {
 
 // ---------------------------------------------------------------------------
 
-type Sablona = "spotrebic" | "pracovni_stroj" | "elektricke_zarizeni" | "elektricke_zarizeni_objekt";
+// Šablona E: "REVIZNÍ ZPRÁVA o revizi tlakové nádoby stabilní" (zákon
+// č. 250/2021 Sb., NV č. 192/2022 Sb.) – jedna zpráva na víc stránek, bez
+// uvedeného počtu stran (appka spojuje stránky až do další titulní stránky).
+// Číslo zařízení ("označení TN 088") se normalizuje na "TN088", druh revize
+// (provozní/vnitřní/tlaková zkouška) určuje, ke kterému řádku plánu zpráva
+// patří (viz lib/druhRevize.ts). Textová vrstva těchto PDF bývá z OCR
+// (poškozená písmena, mezery uvnitř jmen), proto jsou popisky vyhledávané
+// fuzzy a hodnoty tolerantní.
+// ---------------------------------------------------------------------------
+
+/** Hodnota za popiskem na stejném řádku, nebo (když je za popiskem prázdno) první neprázdný řádek pod ním. */
+function hodnotaZaPopiskem(lines: string[], label: string): string | null {
+  const re = new RegExp(fuzzy(label) + "(.*)", "i");
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(re);
+    if (!match) continue;
+    const zbytek = match[1].trim();
+    if (zbytek) return zbytek;
+    const dalsi = lines.slice(i + 1).find((l) => l.trim());
+    return dalsi ? dalsi.trim() : null;
+  }
+  return null;
+}
+
+function spojRadky(lines: string[]): string {
+  return lines.join(" ").replace(/\s+/g, " ");
+}
+
+/**
+ * "Umístění nádoby: na stroji omočení PERS 03, označení TN 088" → "TN088".
+ * Číslice se doplní nulami na tři místa (plán drží TN001…TN088), případné
+ * písmeno O na místě nuly (typická chyba OCR) se opraví na 0.
+ */
+function extractCisloZarizeniTlakovaNadoba(lines: string[]): string | null {
+  const text = lines.join(" ");
+  const vzory = [
+    new RegExp(fuzzy("označení") + ":?\\s*T\\s*N\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
+    /\bT\s?N\s?[-–]?\s?([\dOo]{2,4})\b/,
+  ];
+  for (const vzor of vzory) {
+    const match = text.match(vzor);
+    if (!match || !/\d/.test(match[1])) continue;
+    return "TN" + match[1].replace(/[Oo]/g, "0").padStart(3, "0");
+  }
+  return null;
+}
+
+function extractDatumProvedeniTlakovaNadoba(lines: string[]): Date | null {
+  const raw = hodnotaZaPopiskem(lines, "Datum revize:");
+  return raw ? parseFlexibleDate(raw.replace(/\s+/g, "")) : null;
+}
+
+/**
+ * "Platnost provozní revize je do 3/2027." – termín příští revize. Měsíc/rok
+ * (nebo plné datum) se hledá ve větě začínající "Platnost", jejíž konec
+ * ("je do …") je u všech druhů revize stejný; mezery uvnitř čísla se
+ * odstraní stejně jako u ostatních šablon (viz šablona C).
+ */
+function extractTerminTlakovaNadoba(lines: string[]): Date | null {
+  const match = spojRadky(lines).match(
+    /Platnost[^.]{0,60}?je\s*do\s*:?\s*(\d{1,2}\s*\/\s*\d{2,4}|\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{4})/i
+  );
+  return match ? parseTerminHodnota(match[1].replace(/\s+/g, "")) : null;
+}
+
+function extractDruhRevizeTlakovaNadoba(lines: string[]): DruhRevize | null {
+  const raw = hodnotaZaPopiskem(lines, "Druh revize:");
+  if (!raw) return null;
+  const text = raw
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+  if (/provoz/.test(text)) return "provozni";
+  if (/vnitr/.test(text)) return "vnitrni";
+  if (/zkou|tlak/.test(text)) return "zkouska";
+  return null;
+}
+
+/**
+ * Výsledek se (na rozdíl od šablony C) čte z věty za "Výsledek revize:" a z
+ * pole "Termín odstranění závad:" – "---" znamená žádné závady. NOK je
+ * každá zpráva s vyplněným termínem odstranění závad nebo s větou "není
+ * schopen provozu"; OK jen zpráva s větou "schopen dalšího bezpečného
+ * provozu" a bez závad; cokoli jiného (i nerozpoznané) je KE_KONTROLE.
+ */
+function extractVysledekTlakovaNadoba(lines: string[]): {
+  vysledek_revize: VysledekRevize;
+  zjistena_zavada: string | null;
+  celkove_hodnoceni: string;
+} {
+  const text = spojRadky(lines);
+  const upozorneni = fuzzy("UPOZORNĚNÍ");
+  const vysledekMatch = text.match(
+    new RegExp(
+      fuzzy("Výsledek revize:") + "(.*?)(?:" + fuzzy("Termín odstranění závad") + "|" + upozorneni + "|$)",
+      "i"
+    )
+  );
+  const vysledekText = vysledekMatch ? vysledekMatch[1].trim() : "";
+  const zavadyMatch = text.match(
+    new RegExp(fuzzy("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + upozorneni + "|$)", "i")
+  );
+  const zavadyText = zavadyMatch ? zavadyMatch[1].trim().slice(0, 200) : "";
+  const zavadyPrazdne = /^[-–—.\s]*$/.test(zavadyText);
+
+  const jePozitivni = new RegExp(fuzzy("schopen dalšího bezpečného provozu"), "i").test(vysledekText);
+  const jeNegativni = /nen[ií]\s*schopen|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(vysledekText);
+
+  let vysledek_revize: VysledekRevize = "KE_KONTROLE";
+  let zjistena_zavada: string | null = null;
+  if (!zavadyPrazdne || jeNegativni) {
+    vysledek_revize = "NOK";
+    zjistena_zavada =
+      [vysledekText.slice(0, 500), zavadyPrazdne ? "" : `Termín odstranění závad: ${zavadyText}`]
+        .filter(Boolean)
+        .join(" ") || null;
+  } else if (jePozitivni) {
+    vysledek_revize = "OK";
+  }
+  return { vysledek_revize, zjistena_zavada, celkove_hodnoceni: vysledekText.slice(0, 300) };
+}
+
+/** Jednopísmenné tokeny po sobě (OCR rozdělené "Š m í d l") se slijí zpět do slova. */
+function slijRozdelenaPismena(jmeno: string): string {
+  const tokeny = jmeno.split(/\s+/).filter(Boolean);
+  const vystup: string[] = [];
+  let beh: string[] = [];
+  const uzavriBeh = () => {
+    if (beh.length >= 3) vystup.push(beh.join(""));
+    else vystup.push(...beh);
+    beh = [];
+  };
+  for (const token of tokeny) {
+    if (/^\p{L}$/u.test(token)) {
+      beh.push(token);
+    } else {
+      uzavriBeh();
+      vystup.push(token);
+    }
+  }
+  uzavriBeh();
+  return vystup.join(" ");
+}
+
+/** "…provedl revizní technik tlakových nádob s Bohumil Š m í d l, evidenční číslo 3670/24/R-TZ-NI,NII" */
+function extractTechnikTlakovaNadoba(lines: string[]): {
+  technik_jmeno: string | null;
+  technik_cislo_opravneni: string | null;
+} {
+  const text = spojRadky(lines);
+  const cisloVzor = "evidenčn[ií]\\s*[čc][ií]slo\\s*:?\\s*([\\w/\\-]+(?:\\s*,\\s*[\\w/\\-]+)*)";
+  const plny = text.match(
+    new RegExp(
+      "proved\\S*\\s+revizn[ií]\\s+technik\\b[^,]{0,80}?\\bn[áa]dob\\s+(?:stabiln\\S*\\s+)?(?:s\\s+)?([^,]{2,60}?)\\s*,\\s*" +
+        cisloVzor,
+      "i"
+    )
+  );
+  if (plny) {
+    return {
+      technik_jmeno: slijRozdelenaPismena(plny[1].trim()) || null,
+      technik_cislo_opravneni: plny[2].replace(/\s+/g, "") || null,
+    };
+  }
+  const jenCislo = text.match(new RegExp(cisloVzor, "i"));
+  return {
+    technik_jmeno: null,
+    technik_cislo_opravneni: jenCislo ? jenCislo[1].replace(/\s+/g, "") : null,
+  };
+}
+
+function extractTlakovaNadobaZprava(lines: string[]) {
+  const { vysledek_revize, zjistena_zavada, celkove_hodnoceni } = extractVysledekTlakovaNadoba(lines);
+  return {
+    cislo_zarizeni: extractCisloZarizeniTlakovaNadoba(lines),
+    datum_provedeni: extractDatumProvedeniTlakovaNadoba(lines),
+    novy_termin: extractTerminTlakovaNadoba(lines),
+    celkove_hodnoceni,
+    vysledek_revize,
+    zjistena_zavada,
+    druh_revize: extractDruhRevizeTlakovaNadoba(lines),
+    ...extractTechnikTlakovaNadoba(lines),
+  };
+}
+
+/** Titulní stránka zprávy o revizi tlakové nádoby (další stránky téže zprávy titulek nemají). */
+function jeTitulniStrankaTlakoveNadoby(text: string): boolean {
+  return (
+    new RegExp(fuzzy("revizi tlakové nádoby"), "i").test(text) &&
+    new RegExp(fuzzy("revizní zpráva"), "i").test(text)
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+type Sablona =
+  | "spotrebic"
+  | "pracovni_stroj"
+  | "elektricke_zarizeni"
+  | "elektricke_zarizeni_objekt"
+  | "tlakova_nadoba";
 
 /**
  * Podle nadpisu (a u posledních dvou šablon dalšího rozlišovacího popisku)
@@ -914,6 +1122,7 @@ function detectSablona(lines: string[]): Sablona | null {
   const text = lines.join("\n");
   if (/revizi elektrického zařízení pracovního stroje/.test(text)) return "pracovni_stroj";
   if (/revizi elektrického spotřebiče/.test(text)) return "spotrebic";
+  if (jeTitulniStrankaTlakoveNadoby(text)) return "tlakova_nadoba";
   if (new RegExp(fuzzy("Revidovaný objekt:"), "i").test(text)) {
     return "elektricke_zarizeni_objekt";
   }
@@ -1008,6 +1217,62 @@ export async function parseRevizniZpravyPdf(data: ArrayBuffer): Promise<ParseRev
           duvod: `nerozpoznaný typ revizní zprávy (obsah stránky: "${nahled}")`,
         });
         stranka += 1;
+        continue;
+      }
+
+      if (sablona === "tlakova_nadoba") {
+        // Zpráva nemá uvedený počet stran – appka přidá řádky všech dalších
+        // stránek až po další titulní stránku (nebo konec souboru), viz
+        // jeTitulniStrankaTlakoveNadoby.
+        let pocetStran = 1;
+        const vsechnyRadky = [...lines];
+        while (stranka + pocetStran <= doc.numPages) {
+          const dalsiPage = await doc.getPage(stranka + pocetStran);
+          const dalsiContent = await dalsiPage.getTextContent();
+          const dalsiRadky = reconstructLines(dalsiContent.items);
+          if (jeTitulniStrankaTlakoveNadoby(dalsiRadky.join("\n"))) break;
+          vsechnyRadky.push(...dalsiRadky);
+          pocetStran += 1;
+        }
+
+        const extracted = extractTlakovaNadobaZprava(vsechnyRadky);
+        // Náhled skutečně přečteného textu u každého selhání – textová vrstva
+        // těchto PDF bývá z OCR a bez náhledu nejde poznat, co appka četla.
+        const nahled = spojRadky(vsechnyRadky).slice(0, 700);
+        const preskocit = (co: string) => {
+          preskoceno.push({
+            stranka,
+            duvod: `nepodařilo se ${co} (šablona: tlaková nádoba; obsah stránky: "${nahled}")`,
+          });
+          stranka += pocetStran;
+        };
+
+        if (!extracted.cislo_zarizeni) {
+          preskocit("najít číslo zařízení (označení TN…)");
+          continue;
+        }
+        if (!extracted.datum_provedeni) {
+          preskocit("najít datum revize");
+          continue;
+        }
+        if (!extracted.novy_termin) {
+          preskocit("rozpoznat termín příští revize (Platnost … je do …)");
+          continue;
+        }
+
+        zpravy.push({
+          cislo_zarizeni: extracted.cislo_zarizeni,
+          datum_provedeni: extracted.datum_provedeni,
+          novy_termin: extracted.novy_termin,
+          celkove_hodnoceni: extracted.celkove_hodnoceni,
+          vysledek_revize: extracted.vysledek_revize,
+          zjistena_zavada: extracted.zjistena_zavada,
+          technik_jmeno: extracted.technik_jmeno,
+          technik_cislo_opravneni: extracted.technik_cislo_opravneni,
+          stranka,
+          druh_revize: extracted.druh_revize,
+        });
+        stranka += pocetStran;
         continue;
       }
 

@@ -44,6 +44,7 @@ import { describeSaveError } from "@/lib/friendlyError";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
 import { KolekceRevizi } from "@/lib/typRevize";
+import { DRUH_REVIZE_LABELS, DruhRevize, jeDruhRevize, planOdpovidaDruhu } from "@/lib/druhRevize";
 import { useTypRevize } from "@/lib/TypRevizeContext";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -583,6 +584,8 @@ type ProcessedZprava = {
   celkove_hodnoceni: string;
   technik_jmeno: string | null;
   technik_cislo_opravneni: string | null;
+  /** Druh revize ze zprávy (tlakové nádoby), jinak null – viz lib/druhRevize.ts. */
+  druh_revize: DruhRevize | null;
   parovani_stav: ParovaniStav;
   posledni_revize_vcas: boolean | null;
   /**
@@ -698,20 +701,29 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               where("cislo_zarizeni", "==", zprava.cislo_zarizeni)
             );
             const matchSnap = await getDocs(planQuery);
-            const planovane_revize_ids = matchSnap.docs.map((d) => d.id);
+            // Zpráva s uvedeným druhem revize (tlakové nádoby: provozní/vnitřní/
+            // tlaková zkouška) patří JEN k řádku plánu odpovídající frekvence
+            // (viz lib/druhRevize.ts) – ostatní řádky téhož zařízení se
+            // nepočítají vůbec, ani jako "víc shod". Bez druhu (elektro) se
+            // párování chová beze změny podle samotného čísla zařízení.
+            const druhZpravy = zprava.druh_revize ?? null;
+            const kandidati = druhZpravy
+              ? matchSnap.docs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druhZpravy))
+              : matchSnap.docs;
+            const planovane_revize_ids = kandidati.map((d) => d.id);
 
             let parovani_stav: ParovaniStav;
             let posledni_revize_vcas: boolean | null = null;
 
-            if (matchSnap.docs.length === 0) {
+            if (kandidati.length === 0) {
               parovani_stav = "bez_shody";
-            } else if (matchSnap.docs.length > 1) {
+            } else if (kandidati.length > 1) {
               // Zpráva neurčuje, kterého konkrétního plánu (typu revize) se týká –
               // při víc shodách proto nic automaticky needitujeme, jen upozorníme.
               parovani_stav = "vice_shod";
             } else {
               parovani_stav = "shoda";
-              const existingTermin = matchSnap.docs[0].data().termin;
+              const existingTermin = kandidati[0].data().termin;
               const puvodniTermin = existingTermin instanceof Timestamp ? existingTermin.toDate() : null;
               posledni_revize_vcas = puvodniTermin ? zprava.datum_provedeni <= puvodniTermin : null;
             }
@@ -722,7 +734,11 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             // přepíše existující záznam, místo aby vedle něj vytvořilo
             // duplicitu s náhodným ID (to appka dřív dělala, viz komentář u
             // revizniZpravaDocId a dedup v lib/revizniZpravyHistorie.ts).
-            const zpravaId = revizniZpravaDocId(zprava.cislo_zarizeni, zprava.datum_provedeni);
+            const zpravaId = revizniZpravaDocId(
+              zprava.cislo_zarizeni,
+              zprava.datum_provedeni,
+              zprava.druh_revize
+            );
             const zpravaRef = zpravaId
               ? doc(db, kolekce.zpravy, zpravaId)
               : doc(collection(db, kolekce.zpravy));
@@ -748,6 +764,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               celkove_hodnoceni: zprava.celkove_hodnoceni,
               technik_jmeno: zprava.technik_jmeno,
               technik_cislo_opravneni: zprava.technik_cislo_opravneni,
+              druh_revize: druhZpravy,
               parovani_stav,
               posledni_revize_vcas,
               // Dopočítá se až po synchronizaci historie níž – tou dobou už
@@ -789,22 +806,26 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
       setFinalizeProgress({ done: 0, total: dotcenaZarizeni.size });
     }
     let finalizeDone = 0;
-    const overenyTerminByZarizeni = new Map<string, Date | null>();
+    const planDocsByZarizeni = new Map<string, QueryDocumentSnapshot<DocumentData>[]>();
     for (const cislo of dotcenaZarizeni) {
       await synchronizujHistoriiZarizeni(cislo, kolekce);
       const planSnap = await getDocs(
         query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cislo))
       );
-      if (planSnap.docs.length === 1) {
-        const t = planSnap.docs[0].data().termin;
-        overenyTerminByZarizeni.set(cislo, t instanceof Timestamp ? t.toDate() : null);
-      }
+      planDocsByZarizeni.set(cislo, planSnap.docs);
       finalizeDone += 1;
       setFinalizeProgress({ done: finalizeDone, total: dotcenaZarizeni.size });
     }
     for (const p of allProcessed) {
-      if (p.parovani_stav === "shoda") {
-        p.overenyTerminVPlanu = overenyTerminByZarizeni.get(p.cislo_zarizeni) ?? null;
+      if (p.parovani_stav !== "shoda") continue;
+      const planDocs = planDocsByZarizeni.get(p.cislo_zarizeni) ?? [];
+      const druh = p.druh_revize;
+      const kandidati = druh
+        ? planDocs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druh))
+        : planDocs;
+      if (kandidati.length === 1) {
+        const t = kandidati[0].data().termin;
+        p.overenyTerminVPlanu = t instanceof Timestamp ? t.toDate() : null;
       }
     }
 
@@ -950,6 +971,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                   <thead>
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-1.5 pr-4 font-semibold">Číslo zařízení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Druh revize</th>
                       <th className="py-1.5 pr-4 font-semibold">Provedeno</th>
                       <th className="py-1.5 pr-4 font-semibold">Nový termín</th>
                       <th className="py-1.5 pr-4 font-semibold">Hodnocení</th>
@@ -968,6 +990,9 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                       return (
                       <tr key={i} className="border-b border-gray-100">
                         <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
+                        <td className="py-1.5 pr-4">
+                          {p.druh_revize ? DRUH_REVIZE_LABELS[p.druh_revize] : "—"}
+                        </td>
                         <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
                         <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
                         <td className="py-1.5 pr-4">{p.celkove_hodnoceni || "—"}</td>
@@ -1099,9 +1124,13 @@ function vyberAktualniZpravy(
   for (const d of docs) {
     const cislo = d.data().cislo_zarizeni;
     if (typeof cislo === "string" && cislo) {
-      const skupina = podleZarizeni.get(cislo) ?? [];
+      // Zprávy s druhem revize (tlakové nádoby) se drží zvlášť za každý druh,
+      // viz synchronizujHistoriiZarizeni – "nejnovější" je tedy za zařízení A druh.
+      const druh = d.data().druh_revize;
+      const klic = jeDruhRevize(druh) ? `${cislo}|${druh}` : cislo;
+      const skupina = podleZarizeni.get(klic) ?? [];
       skupina.push(d);
-      podleZarizeni.set(cislo, skupina);
+      podleZarizeni.set(klic, skupina);
     } else {
       bezCisla.push(d);
     }

@@ -18,15 +18,21 @@
  * jednoznačnou shodou, aniž by appka zprávu znovu zpracovávala).
  */
 
+import { jeDruhRevize, planOdpovidaDruhu } from "./druhRevize";
+
 export type RevizniZpravaRadek = {
   cislo_zarizeni: string;
   soubor_nazev: string;
   stranka: number;
+  /** Druh revize ze zprávy (tlakové nádoby) – viz lib/druhRevize.ts; bez něj chybí/null. */
+  druh_revize?: string | null;
 };
 
 export type PlanovanaRevizeRadek = {
   cislo_zarizeni: string;
   pu: string;
+  /** Frekvence řádku plánu (roky) – podle ní se zpráva s druhem revize páruje na řádek. */
+  frekvence?: number | null;
 };
 
 export type DetailViceShod = {
@@ -81,12 +87,12 @@ export function analyzujNesparovaneZpravy(
   zpravy: RevizniZpravaRadek[],
   plany: PlanovanaRevizeRadek[]
 ): VysledekAnalyzyNesparovanych {
-  const puPodleZarizeni = new Map<string, string[]>();
+  const planyPodleZarizeni = new Map<string, PlanovanaRevizeRadek[]>();
   for (const p of plany) {
     if (!p.cislo_zarizeni) continue;
-    const seznam = puPodleZarizeni.get(p.cislo_zarizeni) ?? [];
-    seznam.push(p.pu);
-    puPodleZarizeni.set(p.cislo_zarizeni, seznam);
+    const seznam = planyPodleZarizeni.get(p.cislo_zarizeni) ?? [];
+    seznam.push(p);
+    planyPodleZarizeni.set(p.cislo_zarizeni, seznam);
   }
 
   const viceShod: DetailViceShod[] = [];
@@ -98,7 +104,15 @@ export function analyzujNesparovaneZpravy(
       chybiCislo.push({ soubor: z.soubor_nazev, stranka: z.stranka });
       continue;
     }
-    const seznamPu = puPodleZarizeni.get(z.cislo_zarizeni) ?? [];
+    // Zpráva s druhem revize se páruje jen na řádek plánu odpovídající
+    // frekvence (stejně jako při nahrání PDF, viz handleProcess), ostatní
+    // řádky téhož zařízení se nepočítají.
+    const planyZarizeni = planyPodleZarizeni.get(z.cislo_zarizeni) ?? [];
+    const druh = z.druh_revize;
+    const odpovidajici = jeDruhRevize(druh)
+      ? planyZarizeni.filter((p) => planOdpovidaDruhu(p.frekvence, druh))
+      : planyZarizeni;
+    const seznamPu = odpovidajici.map((p) => p.pu);
     if (seznamPu.length === 0) {
       bezShody.push({ cislo_zarizeni: z.cislo_zarizeni, soubor: z.soubor_nazev, stranka: z.stranka });
     } else if (seznamPu.length > 1) {
