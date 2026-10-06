@@ -1113,10 +1113,22 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
     )
   );
   const vysledekText = vysledekMatch ? vysledekMatch[1].trim() : "";
+  // Pole "Termín odstranění závad" končí nadpisem UPOZORNĚNÍ – ten ale OCR
+  // někdy vůbec nepřečte a pole by pak sahalo do následujícího obecného
+  // odstavce ("Provoz tlakové nádoby se řídí…") a ten by se bral jako závada
+  // (falešné NOK). Proto končí i na začátku tohoto odstavce.
+  const konecZavad = [
+    upozorneni,
+    fuzzyD("Provoz tlakové nádoby"),
+    fuzzyD("Provozní revizi je nutno"),
+    fuzzyD("Provozovatel nádoby"),
+  ].join("|");
   const zavadyMatch = text.match(
-    new RegExp(fuzzyD("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + upozorneni + "|$)", "i")
+    new RegExp(fuzzyD("Termín odstranění závad") + "\\s*:?\\s*(.*?)(?:" + konecZavad + "|$)", "i")
   );
-  const zavadyText = zavadyMatch ? zavadyMatch[1].trim().slice(0, 200) : "";
+  // Skutečný záznam v poli je krátký (termín nebo pár slov) – delší text za
+  // ním je už něco jiného, proto se bere jen začátek.
+  const zavadyText = zavadyMatch ? zavadyMatch[1].trim().slice(0, 80) : "";
   // Pole "Termín odstranění závad" je prázdné ("---"), i když OCR přidá
   // zbloudilé znaky ("--- :", "— |"). Závada se bere jako uvedená, jen když
   // pole obsahuje číslici (termín) nebo slovo z aspoň 4 písmen, které
