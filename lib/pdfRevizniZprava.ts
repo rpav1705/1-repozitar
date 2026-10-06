@@ -937,12 +937,18 @@ const DIAKRITIKA_TRIDY: Record<string, string> = {
   ř: "rř", š: "sš", ť: "tť", ú: "uúů", ů: "uúů", ý: "yý", ž: "zž",
 };
 
-/** Jako fuzzy(), navíc každý znak s diakritikou povolí i bez ní (viz DIAKRITIKA_TRIDY). */
+/**
+ * Jako fuzzy(), navíc každý znak s diakritikou povolí i bez ní (viz
+ * DIAKRITIKA_TRIDY) a dvojtečku v popisku i jako ; . , (OCR ji občas přečte
+ * jako středník – "Výsledek revize; …"). Interpunkce se ale vyžaduje, ať
+ * popisek nesedí na nadpis bez ní ("Průběh a výsledek revize").
+ */
 function fuzzyD(label: string): string {
   return label
     .replace(/\s+/g, "")
     .split("")
     .map((ch) => {
+      if (ch === ":") return "[:;.,]\\s*";
       const trida = DIAKRITIKA_TRIDY[ch.toLowerCase()];
       return (trida ? `[${trida}]` : escapeRegExpChar(ch)) + "\\s*";
     })
@@ -1145,8 +1151,12 @@ function extractVysledekTlakovaNadoba(lines: string[]): {
   // následují poznámky a obecné texty, ve kterých se mohou objevit slova jako
   // "nesmí" a nesouvisí s výsledkem revize.
   const verdikt = vysledekText.split(/Platnost/i)[0];
-  const jePozitivni = new RegExp(fuzzyD("schopen dalšího bezpečného provozu"), "i").test(verdikt);
-  const jeNegativni = /nen[ií]\s*schopen|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(verdikt);
+  // "schop\S{0,3}" – zařízení s víc nádobami mají množné číslo ("tlakové nádoby
+  // jsou schopny dalšího bezpečného provozu").
+  const jePozitivni = new RegExp("schop\\S{0,3}\\s*" + fuzzyD("dalšího bezpečného provozu"), "i").test(
+    verdikt
+  );
+  const jeNegativni = /nen[ií]\s*schopen|nejsou\s*schopn|nesm[ií]|nevyhovuj|zak[aá]z[aá]n/i.test(verdikt);
 
   let vysledek_revize: VysledekRevize = "KE_KONTROLE";
   let zjistena_zavada: string | null = null;
