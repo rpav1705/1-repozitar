@@ -16,6 +16,7 @@ import { db, storage } from "@/lib/firebase";
 import { REPROCESS_MARKER_FIELD } from "@/lib/revizniZpravyFirestore";
 import { KolekceRevizi } from "@/lib/typRevize";
 import { DruhRevize, jeDruhRevize, planOdpovidaDruhu } from "@/lib/druhRevize";
+import { urlSeStrankou } from "@/lib/odkazNaStranku";
 
 /**
  * Kolik posledních revizních zpráv (podle "datum_provedeni", sestupně) appka
@@ -328,14 +329,16 @@ async function synchronizujPlanovanouRevizi(
     technik_cislo_opravneni: nejnovejsiData.technik_cislo_opravneni ?? null,
     stav: "cekajici",
     posledni_revize_vcas: posledniRevizeVcas,
-    posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
+    posledni_revizni_zprava_url: urlSeStrankou(nejnovejsiData.pdf_url, nejnovejsiData.stranka),
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
     // Řádek má teď vlastní revizní zprávu, termín dosazený z protokolu jiného
     // druhu (viz dosadDalsiTerminy) už neplatí.
     termin_z_protokolu_id: null,
     vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
     zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
-    predchozi_revizni_zprava_url: predchozi ? predchozi.snap.data().pdf_url ?? null : null,
+    predchozi_revizni_zprava_url: predchozi
+      ? urlSeStrankou(predchozi.snap.data().pdf_url, predchozi.snap.data().stranka)
+      : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
     // Ruční poznámka o opravě (viz app/page.tsx – VysledekReviseBadge) patří k

@@ -22,6 +22,7 @@
 
 import { initializeApp, applicationDefault } from "firebase-admin/app";
 import { getFirestore, Timestamp, Firestore, QueryDocumentSnapshot } from "firebase-admin/firestore";
+import { urlSeStrankou } from "../lib/odkazNaStranku";
 
 const PLANOVANE_REVIZE_COLLECTION = "planovane_revize";
 const REVIZNI_ZPRAVY_COLLECTION = "revizni_zpravy";
@@ -156,11 +157,13 @@ async function main() {
       technik_cislo_opravneni: nejnovejsiData.technik_cislo_opravneni ?? null,
       stav: "cekajici",
       posledni_revize_vcas: posledniRevizeVcas,
-      posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
+      posledni_revizni_zprava_url: urlSeStrankou(nejnovejsiData.pdf_url, nejnovejsiData.stranka),
       posledni_revizni_zprava_id: nejnovejsi.snap.id,
       vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
       zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
-      predchozi_revizni_zprava_url: predchozi ? (predchozi.snap.data().pdf_url ?? null) : null,
+      predchozi_revizni_zprava_url: predchozi
+        ? urlSeStrankou(predchozi.snap.data().pdf_url, predchozi.snap.data().stranka)
+        : null,
       predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
       predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
     });
