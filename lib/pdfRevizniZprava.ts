@@ -968,24 +968,50 @@ function spojRadky(lines: string[]): string {
 }
 
 /**
- * "Umístění nádoby: na stroji omočení PERS 03, označení TN 088" → "TN088".
- * Číslice se doplní nulami na tři místa (plán drží TN001…TN088), případné
- * písmeno O na místě nuly (typická chyba OCR) se opraví na 0.
+ * Číslice z OCR → kód zařízení "TNxxx". Písmeno O na místě nuly (typická chyba
+ * OCR) se opraví na 0, vedoucí nuly navíc ("TNO053" → 0053) se zahodí a číslo
+ * se doplní na tři místa (plán drží TN001…TN147).
  */
-function extractCisloZarizeniTlakovaNadoba(lines: string[]): string | null {
+function normalizujKodTN(cifry: string): string | null {
+  if (!/\d/.test(cifry)) return null;
+  return "TN" + String(Number(cifry.replace(/[Oo]/g, "0"))).padStart(3, "0");
+}
+
+// Volitelné "S" za "TN" ("TNS147") – některé protokoly číslo takhle zapisují,
+// v plánu je zařízení vedené vždy jako TN147, proto se "S" zahodí.
+const KOD_TN = /\bT\s?N\s?S?\s?[-–]?\s?([\dOo]{2,4})\b/g;
+
+/**
+ * Kódy zařízení, ke kterým protokol patří. Obvykle jedno ("označení TN 088"
+ * → TN088), ale SESTAVA nádob má jeden protokol pro víc zařízení najednou
+ * ("Umístění nádoby: sestava … evidenční číslo TNO053, TN 054, TN 055 …") –
+ * pak appka vrátí všechny uvedené kódy a vznikne z toho zpráva pro každé.
+ */
+function extractCislaZarizeniTlakovaNadoba(lines: string[]): string[] {
   const text = lines.join(" ");
+
+  const umisteni = text.match(
+    new RegExp(fuzzyD("Umístění nádoby") + ":?(.{0,400}?)" + fuzzyD("Základní údaje"), "i")
+  );
+  if (umisteni && /sestav|evidenčn[ií]\s*[čc][ií]slo/i.test(umisteni[1])) {
+    const kody = new Set<string>();
+    for (const match of umisteni[1].matchAll(KOD_TN)) {
+      const kod = normalizujKodTN(match[1]);
+      if (kod) kody.add(kod);
+    }
+    if (kody.size >= 2) return Array.from(kody);
+  }
+
   const vzory = [
-    // Volitelné "S" za "TN" ("TNS147") – některé protokoly číslo takhle zapisují,
-    // v plánu je zařízení vedené vždy jako TN147, proto se "S" zahodí.
     new RegExp(fuzzyD("označení") + ":?\\s*T\\s*N\\s*S?\\s*[-–]?\\s*([\\dOo]{1,4})", "i"),
-    /\bT\s?N\s?S?\s?[-–]?\s?([\dOo]{2,4})\b/,
+    new RegExp(KOD_TN.source),
   ];
   for (const vzor of vzory) {
     const match = text.match(vzor);
-    if (!match || !/\d/.test(match[1])) continue;
-    return "TN" + match[1].replace(/[Oo]/g, "0").padStart(3, "0");
+    const kod = match ? normalizujKodTN(match[1]) : null;
+    if (kod) return [kod];
   }
-  return null;
+  return [];
 }
 
 function extractDatumProvedeniTlakovaNadoba(lines: string[]): Date | null {
@@ -1056,8 +1082,12 @@ function extractDruhRevizeTlakovaNadoba(lines: string[]): DruhRevize | null {
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase();
+  // "provozní a zkouška těsnosti" (kombinovaný protokol) se bere jako provozní –
+  // následující zkouška těsnosti se pak dosadí z "dalších termínů".
   if (/provoz/.test(text)) return "provozni";
   if (/vnitr/.test(text)) return "vnitrni";
+  // Zkouška těsnosti je pětiletá kontrola, stejně jako vnitřní revize.
+  if (/tesnost/.test(text)) return "vnitrni";
   if (/zkou|tlak/.test(text)) return "zkouska";
   return null;
 }
@@ -1245,7 +1275,7 @@ function extractTlakovaNadobaZprava(lines: string[]) {
   const druh_revize = extractDruhRevizeTlakovaNadoba(lines);
   return {
     dalsi_terminy: extractDalsiTerminyTlakovaNadoba(lines, druh_revize),
-    cislo_zarizeni: extractCisloZarizeniTlakovaNadoba(lines),
+    cisla_zarizeni: extractCislaZarizeniTlakovaNadoba(lines),
     datum_provedeni: extractDatumProvedeniTlakovaNadoba(lines),
     novy_termin: extractTerminTlakovaNadoba(lines),
     celkove_hodnoceni,
@@ -1258,9 +1288,14 @@ function extractTlakovaNadobaZprava(lines: string[]) {
 
 /** Titulní stránka zprávy o revizi tlakové nádoby (další stránky téže zprávy titulek nemají). */
 function jeTitulniStrankaTlakoveNadoby(text: string): boolean {
+  if (!new RegExp(fuzzyD("revizní zpráva"), "i").test(text)) return false;
+  // Podtitulek "o revizi tlakové nádoby stabilní…" OCR u části protokolů
+  // vůbec nepřečte – titulní stránku pozná appka i podle dvojice popisků
+  // "Druh revize:" + "Umístění nádoby", které mají jen tyhle protokoly.
   return (
-    new RegExp(fuzzyD("revizi tlakové nádoby"), "i").test(text) &&
-    new RegExp(fuzzyD("revizní zpráva"), "i").test(text)
+    new RegExp(fuzzyD("revizi tlakové nádoby"), "i").test(text) ||
+    (new RegExp(fuzzyD("Druh revize:"), "i").test(text) &&
+      new RegExp(fuzzyD("Umístění nádoby"), "i").test(text))
   );
 }
 
@@ -1432,7 +1467,7 @@ export async function parseRevizniZpravyPdf(
           stranka += pocetStran;
         };
 
-        if (!extracted.cislo_zarizeni) {
+        if (extracted.cisla_zarizeni.length === 0) {
           preskocit("najít číslo zařízení (označení TN…)");
           continue;
         }
@@ -1458,26 +1493,31 @@ export async function parseRevizniZpravyPdf(
           continue;
         }
 
-        zpravy.push({
-          cislo_zarizeni: extracted.cislo_zarizeni,
-          datum_provedeni: extracted.datum_provedeni,
-          novy_termin: extracted.novy_termin,
-          celkove_hodnoceni: extracted.celkove_hodnoceni,
-          vysledek_revize: extracted.vysledek_revize,
-          zjistena_zavada: extracted.zjistena_zavada,
-          technik_jmeno: extracted.technik_jmeno,
-          technik_cislo_opravneni: extracted.technik_cislo_opravneni,
-          stranka,
-          druh_revize: extracted.druh_revize,
-          // Jen věrohodné další termíny (po datu revize, nejvýš 11 let) – OCR
-          // může číslici přečíst chybně a termín se zapisuje do plánu.
-          dalsi_terminy: extracted.dalsi_terminy.filter(
-            (t) =>
-              extracted.datum_provedeni !== null &&
-              t.termin > extracted.datum_provedeni &&
-              t.termin.getUTCFullYear() - extracted.datum_provedeni.getUTCFullYear() <= 11
-          ),
-        });
+        // Jen věrohodné další termíny (po datu revize, nejvýš 11 let) – OCR
+        // může číslici přečíst chybně a termín se zapisuje do plánu.
+        const datumProvedeni = extracted.datum_provedeni;
+        const dalsiTerminy = extracted.dalsi_terminy.filter(
+          (t) =>
+            t.termin > datumProvedeni &&
+            t.termin.getUTCFullYear() - datumProvedeni.getUTCFullYear() <= 11
+        );
+        // Sestava nádob = jeden protokol pro víc zařízení: každé dostane vlastní
+        // zprávu se stejnými údaji (stejná stránka, různé číslo zařízení).
+        for (const cislo of extracted.cisla_zarizeni) {
+          zpravy.push({
+            cislo_zarizeni: cislo,
+            datum_provedeni: datumProvedeni,
+            novy_termin: extracted.novy_termin,
+            celkove_hodnoceni: extracted.celkove_hodnoceni,
+            vysledek_revize: extracted.vysledek_revize,
+            zjistena_zavada: extracted.zjistena_zavada,
+            technik_jmeno: extracted.technik_jmeno,
+            technik_cislo_opravneni: extracted.technik_cislo_opravneni,
+            stranka,
+            druh_revize: extracted.druh_revize,
+            dalsi_terminy: dalsiTerminy,
+          });
+        }
         stranka += pocetStran;
         continue;
       }

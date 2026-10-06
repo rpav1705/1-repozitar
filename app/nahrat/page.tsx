@@ -1506,12 +1506,19 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         // při dávkách desítek souborů za sebou).
         await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
 
+        // Víc zpráv může sdílet stránku (sestava nádob = jeden protokol pro víc
+        // zařízení), proto se přeparsovaná zpráva hledá nejdřív přesně podle
+        // stránky + čísla zařízení + druhu revize, a teprve pak jen podle stránky.
         let freshByStranka: Map<number, ParsedRevizniZprava> | null = null;
+        let freshPresne: Map<string, ParsedRevizniZprava> | null = null;
         let downloadError = "";
         try {
           const buffer = await getBytes(ref(storage, storagePath));
           const { zpravy } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
           freshByStranka = new Map(zpravy.map((z) => [z.stranka, z]));
+          freshPresne = new Map(
+            zpravy.map((z) => [`${z.stranka}|${z.cislo_zarizeni}|${z.druh_revize ?? ""}`, z])
+          );
         } catch (err) {
           downloadError =
             err instanceof Error ? err.message : "nepodařilo se stáhnout soubor ze Storage";
@@ -1523,7 +1530,10 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
           const stranka = typeof data.stranka === "number" ? data.stranka : 0;
           const cisloPuvodni = typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "";
 
-          const fresh = freshByStranka?.get(stranka);
+          const druhPuvodni = typeof data.druh_revize === "string" ? data.druh_revize : "";
+          const fresh =
+            freshPresne?.get(`${stranka}|${cisloPuvodni}|${druhPuvodni}`) ??
+            freshByStranka?.get(stranka);
 
           if (downloadError) {
             reportDoc({
