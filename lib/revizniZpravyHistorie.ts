@@ -329,7 +329,11 @@ async function synchronizujPlanovanouRevizi(
     technik_cislo_opravneni: nejnovejsiData.technik_cislo_opravneni ?? null,
     stav: "cekajici",
     posledni_revize_vcas: posledniRevizeVcas,
-    posledni_revizni_zprava_url: urlSeStrankou(nejnovejsiData.pdf_url, nejnovejsiData.stranka),
+    posledni_revizni_zprava_url: urlSeStrankou(
+      nejnovejsiData.pdf_url,
+      nejnovejsiData.stranka,
+      nejnovejsiData.pdf_je_vyrez === true
+    ),
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
     // Řádek má teď vlastní revizní zprávu, termín dosazený z protokolu jiného
     // druhu (viz dosadDalsiTerminy) už neplatí.
@@ -337,7 +341,11 @@ async function synchronizujPlanovanouRevizi(
     vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
     zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
     predchozi_revizni_zprava_url: predchozi
-      ? urlSeStrankou(predchozi.snap.data().pdf_url, predchozi.snap.data().stranka)
+      ? urlSeStrankou(
+          predchozi.snap.data().pdf_url,
+          predchozi.snap.data().stranka,
+          predchozi.snap.data().pdf_je_vyrez === true
+        )
       : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,

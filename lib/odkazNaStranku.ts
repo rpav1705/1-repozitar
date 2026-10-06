@@ -9,8 +9,10 @@
  * "#page=N" na konci adresy jako číslo stránky; u zprávy na první stránce se
  * adresa nemění.
  */
-export function urlSeStrankou(url: unknown, stranka: unknown): string | null {
+export function urlSeStrankou(url: unknown, stranka: unknown, jeVyrez = false): string | null {
   if (typeof url !== "string" || !url) return null;
+  // Samostatný výřez (viz lib/pdfRozdeleni.ts) obsahuje jen stránky té zprávy.
+  if (jeVyrez) return url;
   if (typeof stranka !== "number" || !Number.isFinite(stranka) || stranka <= 1) return url;
   return `${url.split("#")[0]}#page=${Math.floor(stranka)}`;
 }

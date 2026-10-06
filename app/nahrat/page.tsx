@@ -20,7 +20,8 @@ import {
   where,
   writeBatch,
 } from "firebase/firestore";
-import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { deleteObject, getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { otevriZdrojPdf, ZdrojPdf } from "@/lib/pdfRozdeleni";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/lib/pdfRevizniZprava";
 import {
@@ -617,6 +618,86 @@ function sanitizeStoragePathSegment(name: string): string {
   return name.replace(/\//g, "_");
 }
 
+type UlozenyPdf = { path: string; url: string; jeVyrez: boolean };
+
+/** Klíč výřezu: stejná stránka(y) = stejný soubor (sestava nádob sdílí jeden protokol pro víc zařízení). */
+function klicVyrezu(zprava: { stranka: number; pocet_stran?: number }): string {
+  return `${zprava.stranka}-${zprava.pocet_stran ?? 1}`;
+}
+
+/**
+ * Uloží do Storage jedno samostatné PDF jen se stránkami dané zprávy
+ * (výřez z většího souboru – viz lib/pdfRozdeleni.ts). Vrací jeho cestu a URL.
+ */
+async function nahrajVyrez(
+  zdroj: ZdrojPdf,
+  zprava: { stranka: number; pocet_stran?: number },
+  zakladNazvu: string,
+  prefix: string
+): Promise<UlozenyPdf> {
+  const pocet = zprava.pocet_stran ?? 1;
+  const strany = Array.from({ length: pocet }, (_, i) => zprava.stranka + i);
+  const bytes = await zdroj.vyrez(strany);
+  const rozsah = pocet > 1 ? `${zprava.stranka}-${zprava.stranka + pocet - 1}` : `${zprava.stranka}`;
+  const path = `${prefix}/${Date.now()}_${zakladNazvu}_str${rozsah}.pdf`;
+  const fileRef = ref(storage, path);
+  await uploadBytes(fileRef, bytes, { contentType: "application/pdf" });
+  return { path, url: await getDownloadURL(fileRef), jeVyrez: true };
+}
+
+/**
+ * Nahraje PDF zpráv do Storage. Soubor, který obsahuje víc stránek, než kolik
+ * zabírá jeho zprávy (typicky export se stovkami zpráv, jedna na stránku), se
+ * rozdělí: každá zpráva dostane SAMOSTATNÉ PDF jen se svými stránkami, takže
+ * odkaz "Revizní zpráva" u zařízení otevře jen tuhle zprávu, ne celý soubor.
+ * Zprávy ze stejných stránek (sestava nádob) sdílejí jeden výřez. Když se
+ * rozdělení nepovede (poškozený/šifrovaný PDF, nedostupná knihovna), uloží se
+ * jako dřív celý soubor a zprávy na něj odkazují s číslem stránky.
+ */
+async function ulozPdfZprav(
+  buffer: ArrayBuffer,
+  zpravy: ParsedRevizniZprava[],
+  nazevSouboru: string,
+  prefix: string
+): Promise<(zprava: ParsedRevizniZprava) => UlozenyPdf> {
+  const zakladNazvu = sanitizeStoragePathSegment(nazevSouboru).replace(/\.pdf$/i, "");
+  const vyrezy = new Map<string, UlozenyPdf>();
+
+  try {
+    const zdroj = await otevriZdrojPdf(buffer);
+    const potrebaVyrezu =
+      zdroj.pocetStran > 1 && zpravy.some((z) => (z.pocet_stran ?? 1) < zdroj.pocetStran);
+    if (potrebaVyrezu) {
+      for (const zprava of zpravy) {
+        const klic = klicVyrezu(zprava);
+        if (vyrezy.has(klic)) continue;
+        vyrezy.set(klic, await nahrajVyrez(zdroj, zprava, zakladNazvu, prefix));
+      }
+    }
+  } catch (err) {
+    console.warn("Rozdělení PDF na samostatné zprávy se nepovedlo, uloží se celý soubor.", err);
+    // Už nahrané výřezy by zůstaly bez odkazu – best-effort úklid.
+    for (const v of vyrezy.values()) {
+      try {
+        await deleteObject(ref(storage, v.path));
+      } catch {
+        // nekritické
+      }
+    }
+    vyrezy.clear();
+  }
+
+  if (vyrezy.size > 0) {
+    return (zprava) => vyrezy.get(klicVyrezu(zprava)) as UlozenyPdf;
+  }
+
+  const path = `${prefix}/${Date.now()}_${sanitizeStoragePathSegment(nazevSouboru)}`;
+  const fileRef = ref(storage, path);
+  await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
+  const cely: UlozenyPdf = { path, url: await getDownloadURL(fileRef), jeVyrez: false };
+  return () => cely;
+}
+
 function pluralizeSoubor(count: number): string {
   if (count === 1) return "soubor";
   if (count >= 2 && count <= 4) return "soubory";
@@ -692,15 +773,13 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
         }
 
         if (zpravy.length > 0) {
-          // Rozdělení jednotlivých stránek do samostatných PDF by vyžadovalo další
-          // knihovnu – ukládáme proto celý nahraný soubor jednou a každá z něj
-          // rozpoznaná revizní zpráva na něj odkazuje i s číslem stránky.
-          const storagePath = `${kolekce.storagePrefix}/${Date.now()}_${sanitizeStoragePathSegment(file.name)}`;
-          const fileRef = ref(storage, storagePath);
-          await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
-          const pdf_url = await getDownloadURL(fileRef);
+          // Každé zprávě se uloží vlastní PDF jen s jejími stránkami (viz
+          // ulozPdfZprav) – jinak by odkaz "Revizní zpráva" u zařízení otevřel
+          // celý nahraný soubor se stovkami cizích zpráv.
+          const ulozPdf = await ulozPdfZprav(buffer, zpravy, file.name, kolekce.storagePrefix);
 
           for (const zprava of zpravy) {
+            const ulozeny = ulozPdf(zprava);
             const planQuery = query(
               collection(db, kolekce.plan),
               where("cislo_zarizeni", "==", zprava.cislo_zarizeni)
@@ -751,8 +830,11 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
               soubor_nazev: file.name,
-              pdf_storage_path: storagePath,
-              pdf_url,
+              pdf_storage_path: ulozeny.path,
+              pdf_url: ulozeny.url,
+              // Samostatné PDF jen s touhle zprávou – "stranka" výš zůstává
+              // číslo stránky v původním nahraném souboru (viz ulozPdfZprav).
+              ...(ulozeny.jeVyrez ? { pdf_je_vyrez: true } : {}),
               nahrano: Timestamp.fromDate(new Date()),
               planovane_revize_ids,
               parovani_stav,
@@ -1511,6 +1593,11 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         // stránky + čísla zařízení + druhu revize, a teprve pak jen podle stránky.
         let freshByStranka: Map<number, ParsedRevizniZprava> | null = null;
         let freshPresne: Map<string, ParsedRevizniZprava> | null = null;
+        // Zdroj pro vyřezání samostatných PDF (migrace starších zpráv, které
+        // pořád odkazují na celý velký soubor – viz ulozPdfZprav) a výřezy už
+        // nahrané v téhle skupině (sestava nádob sdílí jeden výřez).
+        let zdrojPdf: ZdrojPdf | null = null;
+        const vyrezyGrupy = new Map<string, UlozenyPdf>();
         let downloadError = "";
         try {
           const buffer = await getBytes(ref(storage, storagePath));
@@ -1519,6 +1606,12 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
           freshPresne = new Map(
             zpravy.map((z) => [`${z.stranka}|${z.cislo_zarizeni}|${z.druh_revize ?? ""}`, z])
           );
+          try {
+            zdrojPdf = await otevriZdrojPdf(buffer);
+          } catch {
+            // Bez knihovny/čitelného PDF se zprávy jen přeparsují, odkaz zůstane na celý soubor.
+            zdrojPdf = null;
+          }
         } catch (err) {
           downloadError =
             err instanceof Error ? err.message : "nepodařilo se stáhnout soubor ze Storage";
@@ -1531,9 +1624,12 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
           const cisloPuvodni = typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "";
 
           const druhPuvodni = typeof data.druh_revize === "string" ? data.druh_revize : "";
+          // Samostatný výřez (pdf_je_vyrez) má zprávu vždy na své 1. stránce,
+          // "stranka" v dokumentu je číslo stránky v PŮVODNÍM velkém souboru.
+          const strankaVSouboru = data.pdf_je_vyrez === true ? 1 : stranka;
           const fresh =
-            freshPresne?.get(`${stranka}|${cisloPuvodni}|${druhPuvodni}`) ??
-            freshByStranka?.get(stranka);
+            freshPresne?.get(`${strankaVSouboru}|${cisloPuvodni}|${druhPuvodni}`) ??
+            freshByStranka?.get(strankaVSouboru);
 
           if (downloadError) {
             reportDoc({
@@ -1564,8 +1660,32 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
             });
           } else {
             try {
+              // Zpráva, která pořád odkazuje na celý velký soubor, dostane
+              // samostatné PDF jen se svými stránkami. Když se vyřezání nepovede,
+              // zpráva se přeparsuje normálně a odkaz zůstane na celý soubor.
+              let pdfPole: Record<string, unknown> = {};
+              if (zdrojPdf && data.pdf_je_vyrez !== true && zdrojPdf.pocetStran > (fresh.pocet_stran ?? 1)) {
+                try {
+                  const klic = klicVyrezu(fresh);
+                  let vyrez = vyrezyGrupy.get(klic);
+                  if (!vyrez) {
+                    vyrez = await nahrajVyrez(
+                      zdrojPdf,
+                      fresh,
+                      sanitizeStoragePathSegment(soubor).replace(/\.pdf$/i, ""),
+                      kolekce.storagePrefix
+                    );
+                    vyrezyGrupy.set(klic, vyrez);
+                  }
+                  pdfPole = { pdf_url: vyrez.url, pdf_storage_path: vyrez.path, pdf_je_vyrez: true };
+                } catch (err) {
+                  console.warn("Vyřezání samostatného PDF se nepovedlo, odkaz zůstane na celý soubor.", err);
+                }
+              }
+
               await updateDoc(docSnap.ref, {
                 ...revizniZpravaToFirestoreFields(fresh),
+                ...pdfPole,
                 [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()),
               });
 

@@ -47,6 +47,12 @@ export type ParsedRevizniZprava = {
   /** 1-based číslo stránky uvnitř nahraného PDF. */
   stranka: number;
   /**
+   * Kolik po sobě jdoucích stránek (od "stranka") zpráva v PDF zabírá – podle
+   * toho appka z velkého souboru vyřízne samostatné PDF jen s touhle zprávou
+   * (viz lib/pdfRozdeleni.ts). Chybí = 1.
+   */
+  pocet_stran?: number;
+  /**
    * Druh revize (provozní/vnitřní/tlaková zkouška), pokud ho zpráva uvádí –
    * zatím jen u tlakových nádob (viz šablona E). Podle něj appka zprávu
    * spáruje s řádkem plánu odpovídající frekvence (viz lib/druhRevize.ts).
@@ -1571,6 +1577,7 @@ export async function parseRevizniZpravyPdf(
             technik_jmeno: extracted.technik_jmeno,
             technik_cislo_opravneni: extracted.technik_cislo_opravneni,
             stranka,
+            pocet_stran: pocetStran,
             druh_revize: extracted.druh_revize,
             dalsi_terminy: dalsiTerminy,
           });
@@ -1635,6 +1642,7 @@ export async function parseRevizniZpravyPdf(
           technik_jmeno: extracted.technik_jmeno,
           technik_cislo_opravneni: extracted.technik_cislo_opravneni,
           stranka,
+          pocet_stran: pocetStran,
         });
         stranka += pocetStran;
         continue;
@@ -1689,6 +1697,7 @@ export async function parseRevizniZpravyPdf(
           technik_jmeno: extracted.technik_jmeno,
           technik_cislo_opravneni: extracted.technik_cislo_opravneni,
           stranka,
+          pocet_stran: pocetStran,
         });
         stranka += pocetStran;
         continue;
