@@ -1221,11 +1221,18 @@ type Technik = { technik_jmeno: string | null; technik_cislo_opravneni: string |
  * správné jméno a číslo. Nový technik se přidá sem; neznámý technik se uloží
  * tak, jak ho OCR přečetlo.
  */
-const ZNAMI_TECHNICI: { vzorOpravneni: RegExp; jmeno: string; cisloOpravneni: string }[] = [
+const ZNAMI_TECHNICI: {
+  jmeno: string;
+  /** Čísla oprávnění, která technik v čase měl (nové první) – podle rozpoznatelného prefixu. */
+  opravneni: { vzor: RegExp; cislo: string }[];
+}[] = [
   {
-    vzorOpravneni: /3\s*[6G]\s*7\s*[0O]\s*\/\s*2\s*4/i,
     jmeno: "Bohumil Šmídl",
-    cisloOpravneni: "3670/24/R-TZ-NI,NII",
+    opravneni: [
+      { vzor: /3\s*[6G]\s*7\s*[0O]\s*\/\s*2\s*4/i, cislo: "3670/24/R-TZ-NI,NII" },
+      // Starší protokoly (např. 2024) uvádějí dřívější číslo oprávnění.
+      { vzor: /2\s*2\s*7\s*7\s*\/\s*4\s*\/\s*19/i, cislo: "2277/4/19/R-TZ-NA" },
+    ],
   },
 ];
 
@@ -1253,12 +1260,18 @@ function levenshtein(a: string, b: string): number {
 
 function sjednotZnamehoTechnika(nalezeno: Technik, text: string): Technik {
   for (const znamy of ZNAMI_TECHNICI) {
-    const podleOpravneni = znamy.vzorOpravneni.test(text);
+    const opravneni = znamy.opravneni.find((o) => o.vzor.test(text));
     const podleJmena =
       nalezeno.technik_jmeno !== null &&
       levenshtein(zakladJmena(nalezeno.technik_jmeno), zakladJmena(znamy.jmeno)) <= 3;
-    if (podleOpravneni || podleJmena) {
-      return { technik_jmeno: znamy.jmeno, technik_cislo_opravneni: znamy.cisloOpravneni };
+    if (opravneni || podleJmena) {
+      return {
+        technik_jmeno: znamy.jmeno,
+        // Číslo oprávnění jen když ho appka rozpoznala – jinak zůstane přečtené
+        // (nesmí se podstrčit číslo z jiného období, protokoly ze staršího
+        // roku mají jiné než ty současné).
+        technik_cislo_opravneni: opravneni ? opravneni.cislo : nalezeno.technik_cislo_opravneni,
+      };
     }
   }
   return nalezeno;
@@ -1310,14 +1323,18 @@ function extractTlakovaNadobaZprava(lines: string[]) {
 
 /** Titulní stránka zprávy o revizi tlakové nádoby (další stránky téže zprávy titulek nemají). */
 function jeTitulniStrankaTlakoveNadoby(text: string): boolean {
-  if (!new RegExp(fuzzyD("revizní zpráva"), "i").test(text)) return false;
-  // Podtitulek "o revizi tlakové nádoby stabilní…" OCR u části protokolů
-  // vůbec nepřečte – titulní stránku pozná appka i podle dvojice popisků
-  // "Druh revize:" + "Umístění nádoby", které mají jen tyhle protokoly.
+  const maRevizniZpravu = new RegExp(fuzzyD("revizní zpráva"), "i").test(text);
+  const maPodtitulek = new RegExp(fuzzyD("revizi tlakové nádoby"), "i").test(text);
+  if (maRevizniZpravu && maPodtitulek) return true;
+  // OCR u části protokolů přečte jen jednu půlku titulku (nebo ani jednu:
+  // stylizovaný nadpis "REVIZNÍ" se čte jako "TT V|V|ÍÍ") – titulní stránku
+  // pozná appka i podle dvojice popisků "Druh revize:" + "Umístění nádoby",
+  // které mají jen tyhle protokoly, a aspoň náznaku titulku (slovo "zpráva"
+  // nebo podtitulek "o revizi tlakové nádoby").
   return (
-    new RegExp(fuzzyD("revizi tlakové nádoby"), "i").test(text) ||
-    (new RegExp(fuzzyD("Druh revize:"), "i").test(text) &&
-      new RegExp(fuzzyD("Umístění nádoby"), "i").test(text))
+    new RegExp(fuzzyD("Druh revize:"), "i").test(text) &&
+    new RegExp(fuzzyD("Umístění nádoby"), "i").test(text) &&
+    (maRevizniZpravu || maPodtitulek || /zpr[aá]va/i.test(text))
   );
 }
 
@@ -1475,6 +1492,24 @@ export async function parseRevizniZpravyPdf(
           if (jeTitulniStrankaTlakoveNadoby(dalsiRadky.join("\n"))) break;
           vsechnyRadky.push(...dalsiRadky);
           pocetStran += 1;
+        }
+
+        // Výchozí revize je jednorázový protokol před uvedením nádoby do
+        // provozu – nemá termín příští revize a v plánu pro ni není řádek
+        // (plán drží jen provozní revizi, vnitřní revizi a tlakovou zkoušku).
+        // Appka ji pojmenuje, ať se nehlásí jako "nerozpoznaný typ".
+        const druhPole = hodnotaZaPopiskem(vsechnyRadky, "Druh revize:");
+        if (
+          druhPole &&
+          /vychoz/.test(druhPole.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase())
+        ) {
+          preskoceno.push({
+            stranka,
+            duvod:
+              "výchozí revize se neimportuje – jednorázový protokol před uvedením nádoby do provozu, bez termínu příští revize (šablona: tlaková nádoba)",
+          });
+          stranka += pocetStran;
+          continue;
         }
 
         const extracted = extractTlakovaNadobaZprava(vsechnyRadky);
