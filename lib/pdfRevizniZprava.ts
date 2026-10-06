@@ -1158,12 +1158,67 @@ function slijRozdelenaPismena(jmeno: string): string {
   return vystup.join(" ");
 }
 
+type Technik = { technik_jmeno: string | null; technik_cislo_opravneni: string | null };
+
+/**
+ * Revizní technici, kteří protokoly tlakových nádob opakovaně podepisují.
+ * Jméno a číslo oprávnění jsou v protokolu jen v razítku, které OCR čte
+ * pokaždé jinak ("Šmíd", "Š midl", "Bohumil$ midl", někdy nic) – appka proto
+ * technika pozná podle rozpoznatelného prefixu čísla oprávnění (tolerantně k
+ * OCR záměnám 6/G, 0/O) NEBO podle podobnosti přečteného jména a uloží jeho
+ * správné jméno a číslo. Nový technik se přidá sem; neznámý technik se uloží
+ * tak, jak ho OCR přečetlo.
+ */
+const ZNAMI_TECHNICI: { vzorOpravneni: RegExp; jmeno: string; cisloOpravneni: string }[] = [
+  {
+    vzorOpravneni: /3\s*[6G]\s*7\s*[0O]\s*\/\s*2\s*4/i,
+    jmeno: "Bohumil Šmídl",
+    cisloOpravneni: "3670/24/R-TZ-NI,NII",
+  },
+];
+
+function zakladJmena(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+function levenshtein(a: string, b: string): number {
+  const radek = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let predchozi = radek[0];
+    radek[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const zaloha = radek[j];
+      radek[j] = Math.min(radek[j] + 1, radek[j - 1] + 1, predchozi + (a[i - 1] === b[j - 1] ? 0 : 1));
+      predchozi = zaloha;
+    }
+  }
+  return radek[b.length];
+}
+
+function sjednotZnamehoTechnika(nalezeno: Technik, text: string): Technik {
+  for (const znamy of ZNAMI_TECHNICI) {
+    const podleOpravneni = znamy.vzorOpravneni.test(text);
+    const podleJmena =
+      nalezeno.technik_jmeno !== null &&
+      levenshtein(zakladJmena(nalezeno.technik_jmeno), zakladJmena(znamy.jmeno)) <= 3;
+    if (podleOpravneni || podleJmena) {
+      return { technik_jmeno: znamy.jmeno, technik_cislo_opravneni: znamy.cisloOpravneni };
+    }
+  }
+  return nalezeno;
+}
+
 /** "…provedl revizní technik tlakových nádob s Bohumil Š m í d l, evidenční číslo 3670/24/R-TZ-NI,NII" */
-function extractTechnikTlakovaNadoba(lines: string[]): {
-  technik_jmeno: string | null;
-  technik_cislo_opravneni: string | null;
-} {
+function extractTechnikTlakovaNadoba(lines: string[]): Technik {
   const text = spojRadky(lines);
+  return sjednotZnamehoTechnika(precistTechnikaZTextu(text), text);
+}
+
+function precistTechnikaZTextu(text: string): Technik {
   const cisloVzor = "evidenčn[ií]\\s*[čc][ií]slo\\s*:?\\s*([\\w/\\-]+(?:\\s*,\\s*[\\w/\\-]+)*)";
   const plny = text.match(
     new RegExp(
