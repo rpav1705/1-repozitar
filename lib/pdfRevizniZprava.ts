@@ -591,7 +591,17 @@ function findFuzzyValueAfterLabel(lines: string[], label: string): string | null
  * číslo zařízení.
  */
 function extractNazevRozvadeceZarizeni(lines: string[]): string | null {
-  const raw = findFuzzyValueAfterLabel(lines, "název rozv:");
+  // Popisek je na různých protokolech "název rozv :" i "název rozv.:" (s tečkou
+  // za zkratkou) – tečka před dvojtečkou je proto nepovinná.
+  const popisek = new RegExp(fuzzy("název rozv") + "\\.?\\s*:\\s*(.*)", "i");
+  let raw: string | null = null;
+  for (const line of lines) {
+    const match = line.match(popisek);
+    if (match) {
+      raw = match[1];
+      break;
+    }
+  }
   if (!raw) return null;
   const dalsiPopisekIdx = raw.search(/typ\s*:/i);
   const hodnota = (dalsiPopisekIdx === -1 ? raw : raw.slice(0, dalsiPopisekIdx)).trim();
