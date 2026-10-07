@@ -225,7 +225,7 @@ function extractInventarniCisloSpotrebic(lines: string[]): string | null {
   // překlepu typu "ASST 133") se u téhle šablony v "planovane_revize" nikde
   // nevyskytuje (ověřeno ručně na reálných PDF – viz diagnostika
   // nesparovaných zpráv) – odstraní se, ať se kód přesně shoduje s plánem.
-  return hodnota ? hodnota.replace(/\s+/g, "") : null;
+  return vycistiCisloZarizeni(hodnota ? hodnota.replace(/\s+/g, "") : null);
 }
 
 function extractDatumProvedeniSpotrebic(lines: string[]): Date | null {
@@ -354,7 +354,7 @@ const INVENTARNI_CISLO_STROJ_RE =
 function extractInventarniCisloStroj(lines: string[]): string | null {
   const hodnota = findValueAfterLabel(lines, INVENTARNI_CISLO_STROJ_RE);
   // Viz komentář u stejného .replace() v extractInventarniCisloSpotrebic výš.
-  return hodnota ? hodnota.replace(/\s+/g, "") : null;
+  return vycistiCisloZarizeni(hodnota ? hodnota.replace(/\s+/g, "") : null);
 }
 
 /** "17. leden 2026" -> den 17, měsíc leden, rok 2026 (nesklonný název měsíce). */
@@ -557,6 +557,25 @@ function findFuzzyValueAfterLabel(lines: string[], label: string): string | null
 }
 
 /**
+ * Popisky sousedních polí, které se při selhání zarážky (viz komentář u
+ * extractNazevRozvadeceZarizeni) nebo u prázdného/poškozeného pole umí
+ * omylem dostat celé nebo zčásti do cislo_zarizeni. Skutečné číslo zařízení
+ * nikdy neobsahuje ":" (to je jen ve zdrojových popiscích) a nikdy se
+ * nerovná doslova jednomu z téhle sady – appka proto takový výsledek bere
+ * stejně jako "nenalezeno" (-> "chybí číslo zařízení", viditelné k ruční
+ * kontrole), místo aby ho tiše uložila jako číslo zařízení, které se stejně
+ * nikdy nespáruje s ničím v plánu.
+ */
+const ZNAMY_POPISEK_RE = /^(výrobce|typ|krytí|inv|rozv|v\.?\s*č)$/i;
+
+function vycistiCisloZarizeni(hodnota: string | null): string | null {
+  if (!hodnota) return null;
+  if (hodnota.includes(":")) return null;
+  if (ZNAMY_POPISEK_RE.test(hodnota)) return null;
+  return hodnota;
+}
+
+/**
  * "14, Výsledky měření | název rozv : AGV P06  typ: xx  v.č.: xx …" – appka
  * bere hodnotu ZA popiskem "název rozv:" AŽ PO popisek "typ:" ze sousedního
  * sloupce na stejném řádku (stejný princip jako u šablony D, viz komentář
@@ -567,9 +586,15 @@ function findFuzzyValueAfterLabel(lines: string[], label: string): string | null
 function extractNazevRozvadeceZarizeni(lines: string[]): string | null {
   const raw = findFuzzyValueAfterLabel(lines, "název rozv:");
   if (!raw) return null;
-  const dalsiPopisekIdx = raw.search(/typ\s*:/i);
+  // Fuzzy (ne jen /typ\s*:/i) – stejná "roztržená" mezera uvnitř popisku
+  // (viz komentář u šablony C výš) umí postihnout i tuhle zarážku samotnou
+  // ("t y p:" apod.), a doslovný regex by ji pak nenašel vůbec – appka by
+  // pak do hodnoty vzala celý zbytek řádku včetně navazujících popisků
+  // "typ:", "v.č.:", "výrobce:", "krytí:" (ověřeno v diagnostice
+  // nesparovaných zpráv, viz "AGVN08typ:xxv.č.:xxvýrobce:KIVNONkrytí:xx").
+  const dalsiPopisekIdx = raw.search(new RegExp(fuzzy("typ:"), "i"));
   const hodnota = (dalsiPopisekIdx === -1 ? raw : raw.slice(0, dalsiPopisekIdx)).trim();
-  return hodnota ? hodnota.replace(/\s+/g, "") : null;
+  return vycistiCisloZarizeni(hodnota ? hodnota.replace(/\s+/g, "") : null);
 }
 
 /**
@@ -591,7 +616,7 @@ function extractCisloZarizeniZarizeni(lines: string[]): string | null {
   const raw = findFuzzyValueAfterLabel(lines, "Revize ev. č.");
   if (!raw) return null;
   const cislo = raw.replace(/\s+/g, "");
-  return cislo ? cislo.replace(/-\d{4}$/, "") : null;
+  return vycistiCisloZarizeni(cislo ? cislo.replace(/-\d{4}$/, "") : null);
 }
 
 /**
@@ -778,7 +803,7 @@ function extractCisloZarizeniObjekt(lines: string[]): string | null {
     .slice(posledniPomlckaIdx + 1)
     .replace(/\s+/g, "")
     .replace(/[.,;]+$/, "");
-  return cislo || null;
+  return vycistiCisloZarizeni(cislo || null);
 }
 
 /**
