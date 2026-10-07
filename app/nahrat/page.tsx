@@ -20,7 +20,8 @@ import {
   where,
   writeBatch,
 } from "firebase/firestore";
-import { getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { deleteObject, getBytes, getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { otevriZdrojPdf, ZdrojPdf } from "@/lib/pdfRozdeleni";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/lib/pdfRevizniZprava";
 import {
@@ -43,6 +44,9 @@ import {
 import { describeSaveError } from "@/lib/friendlyError";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
+import { KolekceRevizi } from "@/lib/typRevize";
+import { DRUH_REVIZE_LABELS, DruhRevize, jeDruhRevize, planOdpovidaDruhu } from "@/lib/druhRevize";
+import { useTypRevize } from "@/lib/TypRevizeContext";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
 // rozdělíme do dávek po BATCH_SIZE a commitneme je postupně.
@@ -166,6 +170,7 @@ function ZamekBanner() {
 
 function PlanUpload() {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [file, setFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedPlanRow[]>([]);
   const [skipped, setSkipped] = useState<ParseSkip[]>([]);
@@ -230,7 +235,7 @@ function PlanUpload() {
     setSavedCount(0);
     setNeaktivniVysledek(null);
     try {
-      const col = collection(db, "planovane_revize");
+      const col = collection(db, kolekce.plan);
 
       // Termín z .xls plánu je jen informativní/orientační, dokud k zařízení
       // není zpracovaná revizní zpráva (PDF) – ten termín je závazný a NESMÍ
@@ -245,7 +250,12 @@ function PlanUpload() {
       const existingSnap = await getDocs(col);
       const maTerminZRevizniZpravy = new Set(
         existingSnap.docs
-          .filter((d) => typeof d.data().posledni_revizni_zprava_id === "string")
+          .filter(
+            (d) =>
+              typeof d.data().posledni_revizni_zprava_id === "string" ||
+              // Termín dosazený z protokolu jiného druhu revize (viz dosadDalsiTerminy).
+              typeof d.data().termin_z_protokolu_id === "string"
+          )
           .map((d) => d.id)
       );
       // Pro rozlišení "přidáno" vs. "aktualizováno" v log záznamu (viz
@@ -313,7 +323,7 @@ function PlanUpload() {
           bezPu += 1;
           continue;
         }
-        const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni);
+        const vysledek = await smazNeaktivniZarizeni(puId, row.cislo_zarizeni, kolekce);
         if (vysledek.planSmazan) {
           planSmazano += 1;
           smazanoList.push(row.cislo_zarizeni);
@@ -343,12 +353,15 @@ function PlanUpload() {
       // zařízení, než si toho někdo stihl všimnout. Appka žádné zálohy ani
       // point-in-time recovery nemá, takže se to nedalo jednoduše vrátit.
       try {
-        await zapisPlanImportLog({
-          pridano: pridanoList,
-          aktualizovano: aktualizovanoList,
-          smazano: smazanoList,
-          smazano_zmizele: [],
-        });
+        await zapisPlanImportLog(
+          {
+            pridano: pridanoList,
+            aktualizovano: aktualizovanoList,
+            smazano: smazanoList,
+            smazano_zmizele: [],
+          },
+          kolekce
+        );
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
         // neblokuje samotný (už úspěšně dokončený) import.
@@ -577,6 +590,8 @@ type ProcessedZprava = {
   celkove_hodnoceni: string;
   technik_jmeno: string | null;
   technik_cislo_opravneni: string | null;
+  /** Druh revize ze zprávy (tlakové nádoby), jinak null – viz lib/druhRevize.ts. */
+  druh_revize: DruhRevize | null;
   parovani_stav: ParovaniStav;
   posledni_revize_vcas: boolean | null;
   /**
@@ -603,6 +618,86 @@ function sanitizeStoragePathSegment(name: string): string {
   return name.replace(/\//g, "_");
 }
 
+type UlozenyPdf = { path: string; url: string; jeVyrez: boolean };
+
+/** Klíč výřezu: stejná stránka(y) = stejný soubor (sestava nádob sdílí jeden protokol pro víc zařízení). */
+function klicVyrezu(zprava: { stranka: number; pocet_stran?: number }): string {
+  return `${zprava.stranka}-${zprava.pocet_stran ?? 1}`;
+}
+
+/**
+ * Uloží do Storage jedno samostatné PDF jen se stránkami dané zprávy
+ * (výřez z většího souboru – viz lib/pdfRozdeleni.ts). Vrací jeho cestu a URL.
+ */
+async function nahrajVyrez(
+  zdroj: ZdrojPdf,
+  zprava: { stranka: number; pocet_stran?: number },
+  zakladNazvu: string,
+  prefix: string
+): Promise<UlozenyPdf> {
+  const pocet = zprava.pocet_stran ?? 1;
+  const strany = Array.from({ length: pocet }, (_, i) => zprava.stranka + i);
+  const bytes = await zdroj.vyrez(strany);
+  const rozsah = pocet > 1 ? `${zprava.stranka}-${zprava.stranka + pocet - 1}` : `${zprava.stranka}`;
+  const path = `${prefix}/${Date.now()}_${zakladNazvu}_str${rozsah}.pdf`;
+  const fileRef = ref(storage, path);
+  await uploadBytes(fileRef, bytes, { contentType: "application/pdf" });
+  return { path, url: await getDownloadURL(fileRef), jeVyrez: true };
+}
+
+/**
+ * Nahraje PDF zpráv do Storage. Soubor, který obsahuje víc stránek, než kolik
+ * zabírá jeho zprávy (typicky export se stovkami zpráv, jedna na stránku), se
+ * rozdělí: každá zpráva dostane SAMOSTATNÉ PDF jen se svými stránkami, takže
+ * odkaz "Revizní zpráva" u zařízení otevře jen tuhle zprávu, ne celý soubor.
+ * Zprávy ze stejných stránek (sestava nádob) sdílejí jeden výřez. Když se
+ * rozdělení nepovede (poškozený/šifrovaný PDF, nedostupná knihovna), uloží se
+ * jako dřív celý soubor a zprávy na něj odkazují s číslem stránky.
+ */
+async function ulozPdfZprav(
+  buffer: ArrayBuffer,
+  zpravy: ParsedRevizniZprava[],
+  nazevSouboru: string,
+  prefix: string
+): Promise<(zprava: ParsedRevizniZprava) => UlozenyPdf> {
+  const zakladNazvu = sanitizeStoragePathSegment(nazevSouboru).replace(/\.pdf$/i, "");
+  const vyrezy = new Map<string, UlozenyPdf>();
+
+  try {
+    const zdroj = await otevriZdrojPdf(buffer);
+    const potrebaVyrezu =
+      zdroj.pocetStran > 1 && zpravy.some((z) => (z.pocet_stran ?? 1) < zdroj.pocetStran);
+    if (potrebaVyrezu) {
+      for (const zprava of zpravy) {
+        const klic = klicVyrezu(zprava);
+        if (vyrezy.has(klic)) continue;
+        vyrezy.set(klic, await nahrajVyrez(zdroj, zprava, zakladNazvu, prefix));
+      }
+    }
+  } catch (err) {
+    console.warn("Rozdělení PDF na samostatné zprávy se nepovedlo, uloží se celý soubor.", err);
+    // Už nahrané výřezy by zůstaly bez odkazu – best-effort úklid.
+    for (const v of vyrezy.values()) {
+      try {
+        await deleteObject(ref(storage, v.path));
+      } catch {
+        // nekritické
+      }
+    }
+    vyrezy.clear();
+  }
+
+  if (vyrezy.size > 0) {
+    return (zprava) => vyrezy.get(klicVyrezu(zprava)) as UlozenyPdf;
+  }
+
+  const path = `${prefix}/${Date.now()}_${sanitizeStoragePathSegment(nazevSouboru)}`;
+  const fileRef = ref(storage, path);
+  await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
+  const cely: UlozenyPdf = { path, url: await getDownloadURL(fileRef), jeVyrez: false };
+  return () => cely;
+}
+
 function pluralizeSoubor(count: number): string {
   if (count === 1) return "soubor";
   if (count >= 2 && count <= 4) return "soubory";
@@ -611,6 +706,7 @@ function pluralizeSoubor(count: number): string {
 
 function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "processing" | "finalizing" | "done">("idle");
   const [progress, setProgress] = useState({ done: 0, total: 0 });
@@ -670,41 +766,48 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
     for (const file of files) {
       try {
         const buffer = await file.arrayBuffer();
-        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer);
+        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
 
         for (const p of preskoceno) {
           allSkipped.push({ soubor: file.name, stranka: p.stranka, duvod: p.duvod });
         }
 
         if (zpravy.length > 0) {
-          // Rozdělení jednotlivých stránek do samostatných PDF by vyžadovalo další
-          // knihovnu – ukládáme proto celý nahraný soubor jednou a každá z něj
-          // rozpoznaná revizní zpráva na něj odkazuje i s číslem stránky.
-          const storagePath = `revizni_zpravy/${Date.now()}_${sanitizeStoragePathSegment(file.name)}`;
-          const fileRef = ref(storage, storagePath);
-          await uploadBytes(fileRef, buffer, { contentType: "application/pdf" });
-          const pdf_url = await getDownloadURL(fileRef);
+          // Každé zprávě se uloží vlastní PDF jen s jejími stránkami (viz
+          // ulozPdfZprav) – jinak by odkaz "Revizní zpráva" u zařízení otevřel
+          // celý nahraný soubor se stovkami cizích zpráv.
+          const ulozPdf = await ulozPdfZprav(buffer, zpravy, file.name, kolekce.storagePrefix);
 
           for (const zprava of zpravy) {
+            const ulozeny = ulozPdf(zprava);
             const planQuery = query(
-              collection(db, "planovane_revize"),
+              collection(db, kolekce.plan),
               where("cislo_zarizeni", "==", zprava.cislo_zarizeni)
             );
             const matchSnap = await getDocs(planQuery);
-            const planovane_revize_ids = matchSnap.docs.map((d) => d.id);
+            // Zpráva s uvedeným druhem revize (tlakové nádoby: provozní/vnitřní/
+            // tlaková zkouška) patří JEN k řádku plánu odpovídající frekvence
+            // (viz lib/druhRevize.ts) – ostatní řádky téhož zařízení se
+            // nepočítají vůbec, ani jako "víc shod". Bez druhu (elektro) se
+            // párování chová beze změny podle samotného čísla zařízení.
+            const druhZpravy = zprava.druh_revize ?? null;
+            const kandidati = druhZpravy
+              ? matchSnap.docs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druhZpravy))
+              : matchSnap.docs;
+            const planovane_revize_ids = kandidati.map((d) => d.id);
 
             let parovani_stav: ParovaniStav;
             let posledni_revize_vcas: boolean | null = null;
 
-            if (matchSnap.docs.length === 0) {
+            if (kandidati.length === 0) {
               parovani_stav = "bez_shody";
-            } else if (matchSnap.docs.length > 1) {
+            } else if (kandidati.length > 1) {
               // Zpráva neurčuje, kterého konkrétního plánu (typu revize) se týká –
               // při víc shodách proto nic automaticky needitujeme, jen upozorníme.
               parovani_stav = "vice_shod";
             } else {
               parovani_stav = "shoda";
-              const existingTermin = matchSnap.docs[0].data().termin;
+              const existingTermin = kandidati[0].data().termin;
               const puvodniTermin = existingTermin instanceof Timestamp ? existingTermin.toDate() : null;
               posledni_revize_vcas = puvodniTermin ? zprava.datum_provedeni <= puvodniTermin : null;
             }
@@ -715,16 +818,23 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             // přepíše existující záznam, místo aby vedle něj vytvořilo
             // duplicitu s náhodným ID (to appka dřív dělala, viz komentář u
             // revizniZpravaDocId a dedup v lib/revizniZpravyHistorie.ts).
-            const zpravaId = revizniZpravaDocId(zprava.cislo_zarizeni, zprava.datum_provedeni);
+            const zpravaId = revizniZpravaDocId(
+              zprava.cislo_zarizeni,
+              zprava.datum_provedeni,
+              zprava.druh_revize
+            );
             const zpravaRef = zpravaId
-              ? doc(db, "revizni_zpravy", zpravaId)
-              : doc(collection(db, "revizni_zpravy"));
+              ? doc(db, kolekce.zpravy, zpravaId)
+              : doc(collection(db, kolekce.zpravy));
             await setDoc(zpravaRef, {
               ...revizniZpravaToFirestoreFields(zprava),
               stranka: zprava.stranka,
               soubor_nazev: file.name,
-              pdf_storage_path: storagePath,
-              pdf_url,
+              pdf_storage_path: ulozeny.path,
+              pdf_url: ulozeny.url,
+              // Samostatné PDF jen s touhle zprávou – "stranka" výš zůstává
+              // číslo stránky v původním nahraném souboru (viz ulozPdfZprav).
+              ...(ulozeny.jeVyrez ? { pdf_je_vyrez: true } : {}),
               nahrano: Timestamp.fromDate(new Date()),
               planovane_revize_ids,
               parovani_stav,
@@ -741,6 +851,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               celkove_hodnoceni: zprava.celkove_hodnoceni,
               technik_jmeno: zprava.technik_jmeno,
               technik_cislo_opravneni: zprava.technik_cislo_opravneni,
+              druh_revize: druhZpravy,
               parovani_stav,
               posledni_revize_vcas,
               // Dopočítá se až po synchronizaci historie níž – tou dobou už
@@ -782,33 +893,40 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
       setFinalizeProgress({ done: 0, total: dotcenaZarizeni.size });
     }
     let finalizeDone = 0;
-    const overenyTerminByZarizeni = new Map<string, Date | null>();
+    const planDocsByZarizeni = new Map<string, QueryDocumentSnapshot<DocumentData>[]>();
     for (const cislo of dotcenaZarizeni) {
-      await synchronizujHistoriiZarizeni(cislo);
+      await synchronizujHistoriiZarizeni(cislo, kolekce);
       const planSnap = await getDocs(
-        query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cislo))
+        query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cislo))
       );
-      if (planSnap.docs.length === 1) {
-        const t = planSnap.docs[0].data().termin;
-        overenyTerminByZarizeni.set(cislo, t instanceof Timestamp ? t.toDate() : null);
-      }
+      planDocsByZarizeni.set(cislo, planSnap.docs);
       finalizeDone += 1;
       setFinalizeProgress({ done: finalizeDone, total: dotcenaZarizeni.size });
     }
     for (const p of allProcessed) {
-      if (p.parovani_stav === "shoda") {
-        p.overenyTerminVPlanu = overenyTerminByZarizeni.get(p.cislo_zarizeni) ?? null;
+      if (p.parovani_stav !== "shoda") continue;
+      const planDocs = planDocsByZarizeni.get(p.cislo_zarizeni) ?? [];
+      const druh = p.druh_revize;
+      const kandidati = druh
+        ? planDocs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druh))
+        : planDocs;
+      if (kandidati.length === 1) {
+        const t = kandidati[0].data().termin;
+        p.overenyTerminVPlanu = t instanceof Timestamp ? t.toDate() : null;
       }
     }
 
     if (allProcessed.length > 0 || allSkipped.length > 0) {
       try {
-        await zapisRevizniZpravyImportLog({
-          zdroj: "nahrani",
-          zpracovano: allProcessed.length,
-          chyba: allSkipped.length,
-          zarizeni: Array.from(dotcenaZarizeni),
-        });
+        await zapisRevizniZpravyImportLog(
+          {
+            zdroj: "nahrani",
+            zpracovano: allProcessed.length,
+            chyba: allSkipped.length,
+            zarizeni: Array.from(dotcenaZarizeni),
+          },
+          kolekce
+        );
       } catch {
         // Log je jen doplňkový přehled na dashboardu – selhání zápisu
         // neblokuje samotné (už úspěšně dokončené) zpracování.
@@ -851,6 +969,14 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
           podle pole <code className="rounded bg-gray-100 px-1 py-0.5">cislo_zarizeni</code>) a uloží
           se do kolekce <code className="rounded bg-gray-100 px-1 py-0.5">revizni_zpravy</code>.
         </p>
+        {kolekce.ocr && (
+          <p className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-[12.5px] text-orange-800">
+            U druhu <strong>{kolekce.label}</strong> appka naskenované PDF (bez textové vrstvy) čte
+            pomocí OCR. První spuštění stáhne jazykový model (cca 7 MB) a přečtení jedné stránky
+            trvá desítky sekund – nech kartu otevřenou. OCR může číslici přečíst chybně, proto si
+            přečtené údaje v tabulce po zpracování zkontroluj.
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center gap-3">
           <FilePickerButton
@@ -940,6 +1066,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                   <thead>
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-1.5 pr-4 font-semibold">Číslo zařízení</th>
+                      <th className="py-1.5 pr-4 font-semibold">Druh revize</th>
                       <th className="py-1.5 pr-4 font-semibold">Provedeno</th>
                       <th className="py-1.5 pr-4 font-semibold">Nový termín</th>
                       <th className="py-1.5 pr-4 font-semibold">Hodnocení</th>
@@ -958,6 +1085,9 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                       return (
                       <tr key={i} className="border-b border-gray-100">
                         <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
+                        <td className="py-1.5 pr-4">
+                          {p.druh_revize ? DRUH_REVIZE_LABELS[p.druh_revize] : "—"}
+                        </td>
                         <td className="py-1.5 pr-4">{p.datum_provedeni.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
                         <td className="py-1.5 pr-4">{p.novy_termin.toLocaleDateString("cs-CZ", { timeZone: "UTC" })}</td>
                         <td className="py-1.5 pr-4">{p.celkove_hodnoceni || "—"}</td>
@@ -1089,9 +1219,13 @@ function vyberAktualniZpravy(
   for (const d of docs) {
     const cislo = d.data().cislo_zarizeni;
     if (typeof cislo === "string" && cislo) {
-      const skupina = podleZarizeni.get(cislo) ?? [];
+      // Zprávy s druhem revize (tlakové nádoby) se drží zvlášť za každý druh,
+      // viz synchronizujHistoriiZarizeni – "nejnovější" je tedy za zařízení A druh.
+      const druh = d.data().druh_revize;
+      const klic = jeDruhRevize(druh) ? `${cislo}|${druh}` : cislo;
+      const skupina = podleZarizeni.get(klic) ?? [];
       skupina.push(d);
-      podleZarizeni.set(cislo, skupina);
+      podleZarizeni.set(klic, skupina);
     } else {
       bezCisla.push(d);
     }
@@ -1149,6 +1283,15 @@ let bezicíZpracovani: { rezim: ReprocessMod; zacatek: Date } | null = null;
 // úspěšně zpracované zprávě, ne až na konci.
 const REPROCESS_CHECKPOINT_KEY = "revizniZpravyReprocessCheckpoint";
 
+// Každý druh revizí (viz lib/typRevize.ts) má vlastní checkpoint – ID zpráv z
+// jednoho druhu nesmí appka použít při zpracování jiného. Elektro drží
+// PŮVODNÍ klíč, ať se případný už rozdělaný checkpoint neztratí.
+function reprocessCheckpointKey(kolekce: KolekceRevizi): string {
+  return kolekce.typ === "elektro"
+    ? REPROCESS_CHECKPOINT_KEY
+    : `${REPROCESS_CHECKPOINT_KEY}_${kolekce.typ}`;
+}
+
 type ReprocessCheckpoint = {
   mod: ReprocessMod;
   /** ID dokumentů "revizni_zpravy", které tenhle běh (i přes případná
@@ -1160,9 +1303,9 @@ type ReprocessCheckpoint = {
   aktualizovano: string;
 };
 
-function nacistReprocessCheckpoint(): ReprocessCheckpoint | null {
+function nacistReprocessCheckpoint(kolekce: KolekceRevizi): ReprocessCheckpoint | null {
   try {
-    const raw = localStorage.getItem(REPROCESS_CHECKPOINT_KEY);
+    const raw = localStorage.getItem(reprocessCheckpointKey(kolekce));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (
@@ -1180,9 +1323,9 @@ function nacistReprocessCheckpoint(): ReprocessCheckpoint | null {
   }
 }
 
-function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint) {
+function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint, kolekce: KolekceRevizi) {
   try {
-    localStorage.setItem(REPROCESS_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+    localStorage.setItem(reprocessCheckpointKey(kolekce), JSON.stringify(checkpoint));
   } catch {
     // localStorage může být nedostupný (soukromé okno, zakázané úložiště…) –
     // checkpoint se prostě neuloží. Přerušení/pokračování přes zavření karty
@@ -1190,9 +1333,9 @@ function ulozitReprocessCheckpoint(checkpoint: ReprocessCheckpoint) {
   }
 }
 
-function smazatReprocessCheckpoint() {
+function smazatReprocessCheckpoint(kolekce: KolekceRevizi) {
   try {
-    localStorage.removeItem(REPROCESS_CHECKPOINT_KEY);
+    localStorage.removeItem(reprocessCheckpointKey(kolekce));
   } catch {
     // viz ulozitReprocessCheckpoint
   }
@@ -1230,6 +1373,7 @@ function smazatReprocessCheckpoint() {
  */
 function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [status, setStatus] = useState<"idle" | "processing" | "done" | "prerusene">("idle");
   // Který ze dvou režimů (viz ReprocessMod) právě běží/naposledy doběhl –
   // jen pro popisky v UI (progress text, souhrn), na volbu dávky uvnitř
@@ -1274,13 +1418,13 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
   const nacistPocty = async () => {
     try {
-      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      const snap = await getDocs(collection(db, kolekce.zpravy));
       const aktualni = vyberAktualniZpravy(snap.docs);
       const nove = aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       setPocetVse(aktualni.length);
       setPocetNove(nove.length);
 
-      const cp = nacistReprocessCheckpoint();
+      const cp = nacistReprocessCheckpoint(kolekce);
       if (cp) {
         const cilova = cp.mod === "vse" ? aktualni : nove;
         const hotoveSet = new Set(cp.hotoveIds);
@@ -1290,7 +1434,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         } else {
           // Poslední zbývající zprávy mezitím zpracoval/smazal někdo jiný
           // (jiná karta, jiný běh) – checkpoint je tak fakticky hotový.
-          smazatReprocessCheckpoint();
+          smazatReprocessCheckpoint(kolekce);
           setCheckpoint(null);
         }
       } else {
@@ -1349,7 +1493,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
     }
     const heartbeatId = zahajHeartbeat();
 
-    const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint() : null;
+    const existujiciCheckpoint = moznosti?.pokracovat ? nacistReprocessCheckpoint(kolekce) : null;
     // Pokračování dává smysl jen se stejným režimem, jaký checkpoint měl -
     // jinak (nebo když se nepokračuje) se prostě začíná s prázdným setem
     // hotových ID, jako dřív.
@@ -1371,7 +1515,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
     bezicíZpracovani = { rezim: mod, zacatek: new Date() };
     try {
-      const snap = await getDocs(collection(db, "revizni_zpravy"));
+      const snap = await getDocs(collection(db, kolekce.zpravy));
       const aktualni = vyberAktualniZpravy(snap.docs);
       const cilova = mod === "vse" ? aktualni : aktualni.filter((d) => !jeZpracovanoReprocessem(d));
       // Zbývající = cílová dávka MINUS to, co už (i z dřívějšího přerušeného
@@ -1444,12 +1588,30 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         // při dávkách desítek souborů za sebou).
         await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
 
+        // Víc zpráv může sdílet stránku (sestava nádob = jeden protokol pro víc
+        // zařízení), proto se přeparsovaná zpráva hledá nejdřív přesně podle
+        // stránky + čísla zařízení + druhu revize, a teprve pak jen podle stránky.
         let freshByStranka: Map<number, ParsedRevizniZprava> | null = null;
+        let freshPresne: Map<string, ParsedRevizniZprava> | null = null;
+        // Zdroj pro vyřezání samostatných PDF (migrace starších zpráv, které
+        // pořád odkazují na celý velký soubor – viz ulozPdfZprav) a výřezy už
+        // nahrané v téhle skupině (sestava nádob sdílí jeden výřez).
+        let zdrojPdf: ZdrojPdf | null = null;
+        const vyrezyGrupy = new Map<string, UlozenyPdf>();
         let downloadError = "";
         try {
           const buffer = await getBytes(ref(storage, storagePath));
-          const { zpravy } = await parseRevizniZpravyPdf(buffer);
+          const { zpravy } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
           freshByStranka = new Map(zpravy.map((z) => [z.stranka, z]));
+          freshPresne = new Map(
+            zpravy.map((z) => [`${z.stranka}|${z.cislo_zarizeni}|${z.druh_revize ?? ""}`, z])
+          );
+          try {
+            zdrojPdf = await otevriZdrojPdf(buffer);
+          } catch {
+            // Bez knihovny/čitelného PDF se zprávy jen přeparsují, odkaz zůstane na celý soubor.
+            zdrojPdf = null;
+          }
         } catch (err) {
           downloadError =
             err instanceof Error ? err.message : "nepodařilo se stáhnout soubor ze Storage";
@@ -1461,7 +1623,13 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
           const stranka = typeof data.stranka === "number" ? data.stranka : 0;
           const cisloPuvodni = typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "";
 
-          const fresh = freshByStranka?.get(stranka);
+          const druhPuvodni = typeof data.druh_revize === "string" ? data.druh_revize : "";
+          // Samostatný výřez (pdf_je_vyrez) má zprávu vždy na své 1. stránce,
+          // "stranka" v dokumentu je číslo stránky v PŮVODNÍM velkém souboru.
+          const strankaVSouboru = data.pdf_je_vyrez === true ? 1 : stranka;
+          const fresh =
+            freshPresne?.get(`${strankaVSouboru}|${cisloPuvodni}|${druhPuvodni}`) ??
+            freshByStranka?.get(strankaVSouboru);
 
           if (downloadError) {
             reportDoc({
@@ -1492,8 +1660,32 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
             });
           } else {
             try {
+              // Zpráva, která pořád odkazuje na celý velký soubor, dostane
+              // samostatné PDF jen se svými stránkami. Když se vyřezání nepovede,
+              // zpráva se přeparsuje normálně a odkaz zůstane na celý soubor.
+              let pdfPole: Record<string, unknown> = {};
+              if (zdrojPdf && data.pdf_je_vyrez !== true && zdrojPdf.pocetStran > (fresh.pocet_stran ?? 1)) {
+                try {
+                  const klic = klicVyrezu(fresh);
+                  let vyrez = vyrezyGrupy.get(klic);
+                  if (!vyrez) {
+                    vyrez = await nahrajVyrez(
+                      zdrojPdf,
+                      fresh,
+                      sanitizeStoragePathSegment(soubor).replace(/\.pdf$/i, ""),
+                      kolekce.storagePrefix
+                    );
+                    vyrezyGrupy.set(klic, vyrez);
+                  }
+                  pdfPole = { pdf_url: vyrez.url, pdf_storage_path: vyrez.path, pdf_je_vyrez: true };
+                } catch (err) {
+                  console.warn("Vyřezání samostatného PDF se nepovedlo, odkaz zůstane na celý soubor.", err);
+                }
+              }
+
               await updateDoc(docSnap.ref, {
                 ...revizniZpravaToFirestoreFields(fresh),
+                ...pdfPole,
                 [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()),
               });
 
@@ -1501,11 +1693,14 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               // zprávě (ne až na konci) – ať přerušení/pád prohlížeče
               // uprostřed běhu neztratí rozdělanou práci.
               hotoveIdsRunning.add(docSnap.id);
-              ulozitReprocessCheckpoint({
-                mod,
-                hotoveIds: Array.from(hotoveIdsRunning),
-                aktualizovano: new Date().toISOString(),
-              });
+              ulozitReprocessCheckpoint(
+                {
+                  mod,
+                  hotoveIds: Array.from(hotoveIdsRunning),
+                  aktualizovano: new Date().toISOString(),
+                },
+                kolekce
+              );
 
               // Dosazení do plánu (a případné prořezání starší historie) se
               // řeší až po přepočítání úplně všech zpráv, viz
@@ -1614,7 +1809,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         while (nextPruneIndex < zarizeniList.length) {
           const cislo = zarizeniList[nextPruneIndex];
           nextPruneIndex += 1;
-          const vysledek = await synchronizujHistoriiZarizeni(cislo);
+          const vysledek = await synchronizujHistoriiZarizeni(cislo, kolekce);
           if (vysledek.smazanoZaznamu > 0) souhrn.zarizeniSMazanim += 1;
           souhrn.smazanoZaznamu += vysledek.smazanoZaznamu;
           souhrn.smazanoSouboru += vysledek.smazanoSouboru;
@@ -1642,12 +1837,15 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 
       if (done > 0) {
         try {
-          await zapisRevizniZpravyImportLog({
-            zdroj: mod === "vse" ? "zpracovat_ulozene_vse" : "zpracovat_ulozene_nove",
-            zpracovano: uspesneCount,
-            chyba: chybaCount,
-            zarizeni: Array.from(dotcenaZarizeni),
-          });
+          await zapisRevizniZpravyImportLog(
+            {
+              zdroj: mod === "vse" ? "zpracovat_ulozene_vse" : "zpracovat_ulozene_nove",
+              zpracovano: uspesneCount,
+              chyba: chybaCount,
+              zarizeni: Array.from(dotcenaZarizeni),
+            },
+            kolekce
+          );
         } catch {
           // Log je jen doplňkový přehled na dashboardu – selhání zápisu
           // neblokuje samotné (už úspěšně dokončené/přerušené) zpracování.
@@ -1659,7 +1857,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
         // pokračovalo přesně od zbývajících záznamů.
         setStatus("prerusene");
       } else {
-        smazatReprocessCheckpoint();
+        smazatReprocessCheckpoint(kolekce);
         setStatus("done");
       }
       // Prořezání (a případné mezitím nahrané nové zprávy, nebo přerušení)
@@ -1737,7 +1935,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               </button>
               <button
                 onClick={() => {
-                  smazatReprocessCheckpoint();
+                  smazatReprocessCheckpoint(kolekce);
                   setCheckpoint(null);
                 }}
                 className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] font-semibold text-gray-500 transition-colors hover:bg-gray-50"
@@ -2133,6 +2331,7 @@ function AnalyzaTabulkaChybiCislo({
  */
 function NesparovaneZpravySection() {
   const { user } = useAuth();
+  const { kolekce } = useTypRevize();
   const [stav, setStav] = useState<"idle" | "nacitam" | "hotovo" | "chyba">("idle");
   const [vysledek, setVysledek] = useState<AnalyzaVysledek | null>(null);
   const [chyba, setChyba] = useState("");
@@ -2144,7 +2343,7 @@ function NesparovaneZpravySection() {
     try {
       if (!user) throw new Error("Nejsi přihlášen/a – obnov prosím stránku a přihlas se znovu.");
       const token = await user.getIdToken();
-      const res = await fetch(ANALYZA_NESPAROVANYCH_URL, {
+      const res = await fetch(`${ANALYZA_NESPAROVANYCH_URL}?typ=${encodeURIComponent(kolekce.typ)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       // Nejdřív si přečteme tělo jako text – odpověď serveru se dá takhle
@@ -2289,8 +2488,17 @@ function NesparovaneZpravySection() {
 }
 
 export default function NahratPage() {
+  const { typ } = useTypRevize();
+  // key = druh revizí – při přepnutí se celá stránka přemountuje, ať se
+  // rozpracovaný výběr souborů/náhled/výsledky z jednoho druhu nikdy
+  // nepřenesou do druhého (a omylem se neuložily do špatných kolekcí).
+  return <NahratStranka key={typ} />;
+}
+
+function NahratStranka() {
   const { user } = useAuth();
   const { role } = useUserRole(user);
+  const { kolekce } = useTypRevize();
   // Zvýší se po úspěšném nahrání nových revizních zpráv v RevizniZpravyUpload
   // – RevizniZpravyReprocess si podle něj přepočítá "Ke zpracování: N
   // nových…" (jinak by ten počet zůstal starý, dokud by uživatel stránku
@@ -2305,6 +2513,10 @@ export default function NahratPage() {
           <AppNav role={role} />
 
           <div className="flex flex-col gap-4 px-7 py-6">
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-2.5 text-[12.5px] text-blue-700">
+              Importy a zpracování na téhle stránce se týkají druhu revizí:{" "}
+              <strong>{kolekce.label}</strong> (druh se přepíná vpravo v navigaci).
+            </div>
             <ZamekBanner />
             <PlanUpload />
             <RevizniZpravyUpload onUlozeno={() => setRevizniZpravyReloadKey((k) => k + 1)} />

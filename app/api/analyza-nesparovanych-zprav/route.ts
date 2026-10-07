@@ -5,6 +5,7 @@ import {
   PlanovanaRevizeRadek,
   RevizniZpravaRadek,
 } from "@/lib/analyzaNesparovanychZprav";
+import { jeTypRevize, kolekceProTyp, VYCHOZI_TYP_REVIZE } from "@/lib/typRevize";
 
 // Vždycky se počítá znovu na vyžádání (tlačítko v appce), nikdy se
 // neprerenderuje staticky při buildu ani se necachuje mezi požadavky – jinak
@@ -43,12 +44,23 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  // Druh revizí (viz lib/typRevize.ts) – bez parametru výchozí (elektro), neznámá
+  // hodnota je chyba požadavku, ne tiché použití jiné sady kolekcí.
+  const typParam = request.nextUrl.searchParams.get("typ");
+  if (typParam !== null && !jeTypRevize(typParam)) {
+    return NextResponse.json({ error: `Neznámý druh revizí: ${typParam}` }, { status: 400 });
+  }
+  const kolekce = kolekceProTyp(jeTypRevize(typParam) ? typParam : VYCHOZI_TYP_REVIZE);
+
   try {
     const db = ziskejAdminFirestore();
 
     const [zpravySnap, planySnap] = await Promise.all([
-      db.collection("revizni_zpravy").select("cislo_zarizeni", "soubor_nazev", "stranka").get(),
-      db.collection("planovane_revize").select("cislo_zarizeni", "pu").get(),
+      db
+        .collection(kolekce.zpravy)
+        .select("cislo_zarizeni", "soubor_nazev", "stranka", "druh_revize")
+        .get(),
+      db.collection(kolekce.plan).select("cislo_zarizeni", "pu", "frekvence").get(),
     ]);
 
     const zpravy: RevizniZpravaRadek[] = zpravySnap.docs.map((d) => {
@@ -57,6 +69,7 @@ export async function GET(request: NextRequest) {
         cislo_zarizeni: typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "",
         soubor_nazev: typeof data.soubor_nazev === "string" ? data.soubor_nazev : "",
         stranka: typeof data.stranka === "number" ? data.stranka : 0,
+        druh_revize: typeof data.druh_revize === "string" ? data.druh_revize : null,
       };
     });
 
@@ -65,6 +78,7 @@ export async function GET(request: NextRequest) {
       return {
         cislo_zarizeni: typeof data.cislo_zarizeni === "string" ? data.cislo_zarizeni : "",
         pu: typeof data.pu === "string" ? data.pu : "",
+        frekvence: typeof data.frekvence === "number" ? data.frekvence : null,
       };
     });
 

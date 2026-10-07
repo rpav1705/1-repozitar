@@ -62,6 +62,7 @@ import { initializeApp, applicationDefault } from "firebase-admin/app";
 import { getFirestore, Timestamp, Firestore, QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava } from "../lib/pdfRevizniZprava";
+import { urlSeStrankou } from "../lib/odkazNaStranku";
 import { REPROCESS_MARKER_FIELD } from "../lib/revizniZpravyFirestore";
 
 type Bucket = ReturnType<ReturnType<typeof getStorage>["bucket"]>;
@@ -430,11 +431,21 @@ async function synchronizujPlanovanouReviziAdmin(
     technik_cislo_opravneni: nejnovejsiData.technik_cislo_opravneni ?? null,
     stav: "cekajici",
     posledni_revize_vcas: posledniRevizeVcas,
-    posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
+    posledni_revizni_zprava_url: urlSeStrankou(
+      nejnovejsiData.pdf_url,
+      nejnovejsiData.stranka,
+      nejnovejsiData.pdf_je_vyrez === true
+    ),
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
     vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
     zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
-    predchozi_revizni_zprava_url: predchozi ? (predchozi.snap.data().pdf_url ?? null) : null,
+    predchozi_revizni_zprava_url: predchozi
+      ? urlSeStrankou(
+          predchozi.snap.data().pdf_url,
+          predchozi.snap.data().stranka,
+          predchozi.snap.data().pdf_je_vyrez === true
+        )
+      : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
     // Viz stejný komentář u synchronizujPlanovanouRevizi v

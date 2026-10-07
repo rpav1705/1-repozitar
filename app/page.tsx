@@ -28,9 +28,10 @@ import { formatCena } from "@/lib/formatCena";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { VysledekRevize } from "@/lib/pdfRevizniZprava";
 import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
+import { KolekceRevizi } from "@/lib/typRevize";
+import { DRUH_REVIZE_LABELS, druhProFrekvenci } from "@/lib/druhRevize";
+import { useTypRevize } from "@/lib/TypRevizeContext";
 
-const PLAN_COLLECTION = "planovane_revize";
-const CENIK_COLLECTION = "cenik";
 // Zobrazujeme všechny záznamy (aktuálně ~3032) – limit necháváme jen jako
 // bezpečnostní strop, ať jedno načtení nikdy neroztáhne dotaz do nekonečna.
 const TABLE_LIMIT = 5000;
@@ -40,6 +41,9 @@ const MISSING_TERMIN_STAV = "chybi_termin";
 type PlanRow = {
   id: string;
   cislo_zarizeni: string;
+  /** Frekvence plánované revize (číslo) a její jednotky ("YEARS" apod.) z importu plánu. */
+  frekvence: number | null;
+  jednotkyFrekvence: string;
   popis: string;
   /** null = při importu se nepodařilo rozpoznat termín (stav "chybi_termin"). */
   termin: Date | null;
@@ -435,6 +439,31 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function slovoPodlePoctu(n: number, jedna: string, dvaAzCtyri: string, petAVic: string): string {
+  if (n === 1) return jedna;
+  if (n >= 2 && n <= 4) return dvaAzCtyri;
+  return petAVic;
+}
+
+/** "1 rok", "5 let", "10 let" (jednotky z Maxima: YEARS, MONTHS…), jinak číslo s původní jednotkou. */
+function formatFrekvence(frekvence: number | null, jednotky: string): string {
+  if (frekvence === null) return "—";
+  const j = jednotky.trim().toUpperCase();
+  if (j === "YEARS" || j === "YEAR") return `${frekvence} ${slovoPodlePoctu(frekvence, "rok", "roky", "let")}`;
+  if (j === "MONTHS" || j === "MONTH") {
+    return `${frekvence} ${slovoPodlePoctu(frekvence, "měsíc", "měsíce", "měsíců")}`;
+  }
+  if (j === "DAYS" || j === "DAY") return `${frekvence} ${slovoPodlePoctu(frekvence, "den", "dny", "dní")}`;
+  return `${frekvence} ${jednotky}`.trim();
+}
+
+/** Druh revize odpovídající frekvenci řádku (provozní/vnitřní/tlaková zkouška), jinak prázdný řetězec. */
+function druhRevizeProRadek(row: PlanRow): string {
+  const druh =
+    row.jednotkyFrekvence.trim().toUpperCase().startsWith("YEAR") ? druhProFrekvenci(row.frekvence) : null;
+  return druh ? DRUH_REVIZE_LABELS[druh] : "";
+}
+
 /**
  * Exportuje řádky do .xlsx souboru se stejnými sloupci, jaké appka ukazuje
  * v tabulce "Přehled zařízení". Appka exportuje přesně tu sadu řádků, kterou
@@ -447,12 +476,19 @@ function exportujDoExcelu(
   startOfToday: Date,
   warnUntil: Date,
   filter: ActiveFilter,
-  search: string
+  search: string,
+  zobrazitFrekvenci: boolean
 ) {
   const data = rows.map((row) => {
     const status = computeStatus(row.termin, startOfToday, warnUntil);
     return {
       "Číslo zařízení": row.cislo_zarizeni,
+      ...(zobrazitFrekvenci
+        ? {
+            Frekvence: formatFrekvence(row.frekvence, row.jednotkyFrekvence),
+            "Druh revize": druhRevizeProRadek(row),
+          }
+        : {}),
       Popis: row.popis,
       Cena: row.cena ?? "",
       "Revize platná do": row.termin
@@ -499,7 +535,7 @@ type DashboardData = {
   rows: PlanRow[];
 };
 
-function useDashboardData() {
+function useDashboardData(kolekce: KolekceRevizi) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -510,13 +546,16 @@ function useDashboardData() {
     async function load() {
       setLoading(true);
       setError("");
+      // Data předchozího druhu revizí se při přepnutí zahodí hned – jinak by
+      // se do dokončení načtení krátce ukazovala data jiného druhu.
+      setData(null);
       try {
         const now = new Date();
         const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const warnUntil = new Date(startOfToday);
         warnUntil.setDate(warnUntil.getDate() + WARN_DAYS);
 
-        const col = collection(db, PLAN_COLLECTION);
+        const col = collection(db, kolekce.plan);
         const startOfTodayTs = Timestamp.fromDate(startOfToday);
         const warnUntilTs = Timestamp.fromDate(warnUntil);
 
@@ -533,7 +572,7 @@ function useDashboardData() {
             getDocs(query(col, orderBy("termin", "asc"), limit(TABLE_LIMIT))),
             // Ceny appka spáruje podle čísla zařízení (viz app/cenik/page.tsx) –
             // stejný přístup jako u výpočtu měsíčních nákladů tam.
-            getDocs(collection(db, CENIK_COLLECTION)),
+            getDocs(collection(db, kolekce.cenik)),
           ]);
 
         if (cancelled) return;
@@ -552,6 +591,9 @@ function useDashboardData() {
           return {
             id: d.id,
             cislo_zarizeni: typeof record.cislo_zarizeni === "string" ? record.cislo_zarizeni : "",
+            frekvence: typeof record.frekvence === "number" ? record.frekvence : null,
+            jednotkyFrekvence:
+              typeof record.jednotky_frekvence === "string" ? record.jednotky_frekvence : "",
             popis: typeof record.popis === "string" ? record.popis : "",
             termin: record.termin instanceof Timestamp ? record.termin.toDate() : null,
             stav: typeof record.stav === "string" ? record.stav : "",
@@ -617,12 +659,11 @@ function useDashboardData() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kolekce]);
 
   return { data, error, loading, setData };
 }
 
-const IMPORT_LOG_COLLECTION = "import_log";
 // Kolik čísel zařízení appka u rozkliknuté karty ukáže najednou – log
 // záznam jich (viz lib/importLog.ts) může mít uložené až tisíc, ale
 // vypisovat všechny by u velkých dávek zbytečně zatížilo vykreslení.
@@ -689,7 +730,7 @@ function nejnovejsiLogDoc(
   return nejnovejsi;
 }
 
-function useImportLogs() {
+function useImportLogs(kolekce: KolekceRevizi) {
   const [data, setData] = useState<ImportLogsData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -698,8 +739,9 @@ function useImportLogs() {
 
     async function load() {
       setLoading(true);
+      setData(null);
       try {
-        const logCol = collection(db, IMPORT_LOG_COLLECTION);
+        const logCol = collection(db, kolekce.log);
         const [planSnap, revizeSnap] = await Promise.all([
           getDocs(query(logCol, where("typ", "==", "plan"))),
           getDocs(query(logCol, where("typ", "==", "revizni_zpravy"))),
@@ -755,7 +797,7 @@ function useImportLogs() {
           // datum nahrání nejnovější uložené revizní zprávy, ať karta místo
           // "chyba" zobrazí nejlepší dostupnou náhradu (viz bod 4 zadání).
           const fallbackSnap = await getDocs(
-            query(collection(db, "revizni_zpravy"), orderBy("nahrano", "desc"), limit(1))
+            query(collection(db, kolekce.zpravy), orderBy("nahrano", "desc"), limit(1))
           );
           if (cancelled) return;
           const nahrano = fallbackSnap.docs[0]?.data().nahrano;
@@ -774,7 +816,7 @@ function useImportLogs() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kolekce]);
 
   return { data, loading };
 }
@@ -857,8 +899,9 @@ function ImportLogCard({
 }
 
 function DashboardOverview({ userEmail }: { userEmail: string }) {
-  const { data, error, loading, setData } = useDashboardData();
-  const { data: importLogs, loading: importLogsLoading } = useImportLogs();
+  const { kolekce } = useTypRevize();
+  const { data, error, loading, setData } = useDashboardData(kolekce);
+  const { data: importLogs, loading: importLogsLoading } = useImportLogs(kolekce);
   const [filter, setFilter] = useState<ActiveFilter>("all");
   const [searchText, setSearchText] = useState("");
   const trimmedSearch = searchText.trim();
@@ -908,7 +951,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
    */
   const oznacitOpraveno = async (rowId: string, poznamka: string) => {
     const opravaDatum = new Date();
-    await updateDoc(doc(db, PLAN_COLLECTION, rowId), {
+    await updateDoc(doc(db, kolekce.plan, rowId), {
       oprava_poznamka: poznamka,
       oprava_datum: Timestamp.fromDate(opravaDatum),
       oprava_uzivatel_email: userEmail,
@@ -940,7 +983,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
       throw new Error("Zařízení nemá platné číslo, cenu nelze uložit.");
     }
     await setDoc(
-      doc(db, CENIK_COLLECTION, id),
+      doc(db, kolekce.cenik, id),
       {
         cislo_zarizeni: row.cislo_zarizeni,
         popis: row.popis,
@@ -1250,7 +1293,14 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                   <button
                     type="button"
                     onClick={() =>
-                      exportujDoExcelu(visibleRows, startOfToday, warnUntil, filter, trimmedSearch)
+                      exportujDoExcelu(
+                        visibleRows,
+                        startOfToday,
+                        warnUntil,
+                        filter,
+                        trimmedSearch,
+                        kolekce.zobrazitFrekvenci
+                      )
                     }
                     title="Exportovat právě zobrazené záznamy (podle aktivního filtru a hledání) do Excelu"
                     className="rounded-md border border-white/30 bg-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white transition-colors hover:bg-white/20"
@@ -1299,6 +1349,9 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                   <thead>
                     <tr className="border-b border-gray-200 text-gray-500">
                       <th className="py-2 pl-[18px] pr-4 font-semibold">Číslo zařízení</th>
+                      {kolekce.zobrazitFrekvenci && (
+                        <th className="py-2 pr-4 font-semibold">Frekvence</th>
+                      )}
                       <th className="py-2 pr-4 font-semibold">Popis</th>
                       <th className="py-2 pr-4 font-semibold">Cena</th>
                       <th className="py-2 pr-4 font-semibold">Revize platná do:</th>
@@ -1319,6 +1372,18 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                           className={`border-l-4 border-b border-gray-100 ${meta.border}`}
                         >
                           <td className="py-2 pl-[14px] pr-4">{row.cislo_zarizeni}</td>
+                          {kolekce.zobrazitFrekvenci && (
+                            <td className="py-2 pr-4 whitespace-nowrap">
+                              <div className="font-semibold">
+                                {formatFrekvence(row.frekvence, row.jednotkyFrekvence)}
+                              </div>
+                              {druhRevizeProRadek(row) && (
+                                <div className="text-[10.5px] text-gray-400">
+                                  {druhRevizeProRadek(row)}
+                                </div>
+                              )}
+                            </td>
+                          )}
                           <td className="py-2 pr-4">{row.popis}</td>
                           <td className="py-2 pr-4">
                             <CenaBunka row={row} onUlozitCenu={(cena) => ulozitCenu(row, cena)} />
@@ -1422,6 +1487,7 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
 export default function Home() {
   const { user } = useAuth();
   const { role } = useUserRole(user);
+  const { typ, kolekce } = useTypRevize();
 
   return (
     <AuthGate>
@@ -1432,10 +1498,12 @@ export default function Home() {
 
           <div className="flex flex-col gap-4 px-7 py-6">
             <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-2.5 text-[12.5px] text-blue-700">
-              Vítej, {user.email}!
+              Vítej, {user.email}! Zobrazené revize: <strong>{kolekce.label}</strong>
             </div>
 
-            <DashboardOverview userEmail={user.email ?? "neznámý uživatel"} />
+            {/* key = druh revizí – při přepnutí se celé přehled přemountuje, ať
+                se nepřenese filtr/hledání/rozbalené karty z jiného druhu. */}
+            <DashboardOverview key={typ} userEmail={user.email ?? "neznámý uživatel"} />
           </div>
         </div>
       )}

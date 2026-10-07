@@ -14,6 +14,9 @@ import {
 import { deleteObject, ref } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
 import { REPROCESS_MARKER_FIELD } from "@/lib/revizniZpravyFirestore";
+import { KolekceRevizi } from "@/lib/typRevize";
+import { DruhRevize, jeDruhRevize, planOdpovidaDruhu } from "@/lib/druhRevize";
+import { urlSeStrankou } from "@/lib/odkazNaStranku";
 
 /**
  * Kolik posledních revizních zpráv (podle "datum_provedeni", sestupně) appka
@@ -107,7 +110,8 @@ function slouzDuplicity(radky: Radek[]): { unikatni: Radek[]; duplicitni: Radek[
  * smazNeaktivniZarizeni (mazání úplně všech zpráv zařízení).
  */
 async function smazZpravy(
-  docs: QueryDocumentSnapshot<DocumentData>[]
+  docs: QueryDocumentSnapshot<DocumentData>[],
+  kolekce: KolekceRevizi
 ): Promise<{ smazanoZaznamu: number; smazanoSouboru: number }> {
   let smazanoZaznamu = 0;
   let smazanoSouboru = 0;
@@ -121,7 +125,7 @@ async function smazZpravy(
 
     if (path) {
       const jesteUzito = await getDocs(
-        query(collection(db, "revizni_zpravy"), where("pdf_storage_path", "==", path))
+        query(collection(db, kolekce.zpravy), where("pdf_storage_path", "==", path))
       );
       if (jesteUzito.empty) {
         try {
@@ -160,51 +164,147 @@ async function smazZpravy(
  * uložených datech.
  */
 export async function synchronizujHistoriiZarizeni(
-  cisloZarizeni: string
+  cisloZarizeni: string,
+  kolekce: KolekceRevizi
 ): Promise<VysledekSynchronizace> {
   const revSnap = await getDocs(
-    query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.zpravy), where("cislo_zarizeni", "==", cisloZarizeni))
   );
 
   const vsechnyRadky: Radek[] = revSnap.docs
     .map((snap) => ({ snap, datumProvedeni: toDate(snap.data().datum_provedeni) }))
     .filter((r): r is Radek => r.datumProvedeni !== null);
 
-  // Duplicity (stejné datum provedení) se sloučí PŘED seřazením/oříznutím na
-  // HISTORIE_LIMIT – jinak by se mohly obě dostat do "ponechane" a appka by
-  // je ukázala jako aktuální i předchozí zprávu zároveň, viz slouzDuplicity.
-  const { unikatni, duplicitni } = slouzDuplicity(vsechnyRadky);
-  const radky = unikatni.sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
+  // Zprávy se rozdělí podle druhu revize (provozní/vnitřní/tlaková zkouška –
+  // jen u tlakových nádob, viz lib/druhRevize.ts): každý druh má v plánu
+  // vlastní řádek, a historie (poslední HISTORIE_LIMIT) se proto drží zvlášť
+  // za každý druh – jinak by pětiletá vnitřní revize zmizela po dvou dalších
+  // ročních provozních. Zprávy bez druhu (elektro) tvoří jedinou skupinu, takže
+  // se chovají přesně jako dřív.
+  const podleDruhu = new Map<string, Radek[]>();
+  for (const radek of vsechnyRadky) {
+    const druhRaw = radek.snap.data().druh_revize;
+    const klic = jeDruhRevize(druhRaw) ? druhRaw : "";
+    const skupina = podleDruhu.get(klic) ?? [];
+    skupina.push(radek);
+    podleDruhu.set(klic, skupina);
+  }
 
-  const ponechane = radky.slice(0, HISTORIE_LIMIT);
-  const kSmazani = [...radky.slice(HISTORIE_LIMIT), ...duplicitni];
+  let smazanoZaznamu = 0;
+  let smazanoSouboru = 0;
+  let duplicitSmazano = 0;
+  let planSynchronizovan = false;
+  // Nejnovější ponechaná zpráva za každý druh – z ní se po synchronizaci plánu
+  // dosadí "další termíny" jiných druhů (viz dosadDalsiTerminy).
+  const nejnovejsiPodleDruhu: Radek[] = [];
 
-  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(kSmazani.map((r) => r.snap));
-  const planSynchronizovan = await synchronizujPlanovanouRevizi(cisloZarizeni, ponechane);
+  for (const [klic, radkyDruhu] of podleDruhu) {
+    // Duplicity (stejné datum provedení) se sloučí PŘED seřazením/oříznutím na
+    // HISTORIE_LIMIT – jinak by se mohly obě dostat do "ponechane" a appka by
+    // je ukázala jako aktuální i předchozí zprávu zároveň, viz slouzDuplicity.
+    const { unikatni, duplicitni } = slouzDuplicity(radkyDruhu);
+    const radky = unikatni.sort((a, b) => b.datumProvedeni.getTime() - a.datumProvedeni.getTime());
 
-  return { smazanoZaznamu, smazanoSouboru, duplicitSmazano: duplicitni.length, planSynchronizovan };
+    const ponechane = radky.slice(0, HISTORIE_LIMIT);
+    const kSmazani = [...radky.slice(HISTORIE_LIMIT), ...duplicitni];
+
+    const smazani = await smazZpravy(
+      kSmazani.map((r) => r.snap),
+      kolekce
+    );
+    smazanoZaznamu += smazani.smazanoZaznamu;
+    smazanoSouboru += smazani.smazanoSouboru;
+    duplicitSmazano += duplicitni.length;
+
+    const synchronizovano = await synchronizujPlanovanouRevizi(
+      cisloZarizeni,
+      ponechane,
+      kolekce,
+      jeDruhRevize(klic) ? klic : null
+    );
+    planSynchronizovan = planSynchronizovan || synchronizovano;
+    if (ponechane.length > 0) nejnovejsiPodleDruhu.push(ponechane[0]);
+  }
+
+  await dosadDalsiTerminy(cisloZarizeni, nejnovejsiPodleDruhu, kolekce);
+
+  return { smazanoZaznamu, smazanoSouboru, duplicitSmazano, planSynchronizovan };
+}
+
+/**
+ * Některé protokoly uvádějí i termín příští revize JINÉHO druhu (např.
+ * provozní revize tlakové nádoby: "následující zkouška těsnosti: 11/2030") –
+ * ten appka dosadí jako termín odpovídajícího řádku plánu (podle frekvence,
+ * viz lib/druhRevize.ts). Dosadí se JEN tam, kde řádek nemá vlastní revizní
+ * zprávu (posledni_revizni_zprava_id) – jakmile se pro něj nahraje skutečný
+ * protokol, ten je závaznější. Řádek si zdroj termínu pamatuje v
+ * "termin_z_protokolu_id", podle něj import plánu termín nepřepíše zpátky
+ * (viz handleSave v app/nahrat/page.tsx). Při víc zdrojích pro stejný druh
+ * vyhrává termín z nejnovější zprávy.
+ */
+async function dosadDalsiTerminy(
+  cisloZarizeni: string,
+  zdroje: Radek[],
+  kolekce: KolekceRevizi
+): Promise<void> {
+  const cile = new Map<string, { termin: Date; zdrojId: string }>();
+  const odNejstarsiho = [...zdroje].sort(
+    (a, b) => a.datumProvedeni.getTime() - b.datumProvedeni.getTime()
+  );
+  for (const zdroj of odNejstarsiho) {
+    const polozky = zdroj.snap.data().dalsi_terminy;
+    if (!Array.isArray(polozky)) continue;
+    for (const polozka of polozky) {
+      if (!jeDruhRevize(polozka?.druh) || !(polozka?.termin instanceof Timestamp)) continue;
+      cile.set(polozka.druh, { termin: polozka.termin.toDate(), zdrojId: zdroj.snap.id });
+    }
+  }
+  if (cile.size === 0) return;
+
+  const planSnap = await getDocs(
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
+  );
+  for (const [druh, { termin, zdrojId }] of cile) {
+    const kandidati = planSnap.docs.filter((d) =>
+      planOdpovidaDruhu(d.data().frekvence, druh as DruhRevize)
+    );
+    if (kandidati.length !== 1) continue;
+    if (typeof kandidati[0].data().posledni_revizni_zprava_id === "string") continue;
+    await updateDoc(kandidati[0].ref, {
+      termin: Timestamp.fromDate(termin),
+      stav: "cekajici",
+      termin_z_protokolu_id: zdrojId,
+    });
+  }
 }
 
 async function synchronizujPlanovanouRevizi(
   cisloZarizeni: string,
-  ponechane: Radek[]
+  ponechane: Radek[],
+  kolekce: KolekceRevizi,
+  druh: DruhRevize | null
 ): Promise<boolean> {
   if (ponechane.length === 0) return false;
 
   const planSnap = await getDocs(
-    query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
   );
+  // U zprávy s druhem revize se bere jen řádek plánu odpovídající frekvence
+  // (viz lib/druhRevize.ts), jinak všechny řádky zařízení.
+  const kandidati = druh
+    ? planSnap.docs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druh))
+    : planSnap.docs;
   // Bez shody nebo víc shod (víc typů revize u stejného čísla zařízení) –
   // stejně jako při párování nic automaticky needitujeme.
-  if (planSnap.docs.length !== 1) return false;
+  if (kandidati.length !== 1) return false;
 
   const [nejnovejsi, predchozi] = ponechane;
   const nejnovejsiData = nejnovejsi.snap.data();
   const novyTermin = toDate(nejnovejsiData.novy_termin);
   if (!novyTermin) return false;
 
-  const planRef = planSnap.docs[0].ref;
-  const planData = planSnap.docs[0].data();
+  const planRef = kandidati[0].ref;
+  const planData = kandidati[0].data();
 
   // posledni_revize_vcas je historická informace spočtená v okamžiku
   // spárování (porovnání data provedení s tehdy platným termínem) – pokud
@@ -229,11 +329,24 @@ async function synchronizujPlanovanouRevizi(
     technik_cislo_opravneni: nejnovejsiData.technik_cislo_opravneni ?? null,
     stav: "cekajici",
     posledni_revize_vcas: posledniRevizeVcas,
-    posledni_revizni_zprava_url: nejnovejsiData.pdf_url ?? null,
+    posledni_revizni_zprava_url: urlSeStrankou(
+      nejnovejsiData.pdf_url,
+      nejnovejsiData.stranka,
+      nejnovejsiData.pdf_je_vyrez === true
+    ),
     posledni_revizni_zprava_id: nejnovejsi.snap.id,
+    // Řádek má teď vlastní revizní zprávu, termín dosazený z protokolu jiného
+    // druhu (viz dosadDalsiTerminy) už neplatí.
+    termin_z_protokolu_id: null,
     vysledek_revize: nejnovejsiData.vysledek_revize ?? null,
     zjistena_zavada: nejnovejsiData.zjistena_zavada ?? null,
-    predchozi_revizni_zprava_url: predchozi ? predchozi.snap.data().pdf_url ?? null : null,
+    predchozi_revizni_zprava_url: predchozi
+      ? urlSeStrankou(
+          predchozi.snap.data().pdf_url,
+          predchozi.snap.data().stranka,
+          predchozi.snap.data().pdf_je_vyrez === true
+        )
+      : null,
     predchozi_revizni_zprava_id: predchozi ? predchozi.snap.id : null,
     predchozi_datum_provedeni: predchozi ? Timestamp.fromDate(predchozi.datumProvedeni) : null,
     // Ruční poznámka o opravě (viz app/page.tsx – VysledekReviseBadge) patří k
@@ -274,9 +387,10 @@ export type VysledekMazaniNeaktivniho = {
  */
 export async function smazNeaktivniZarizeni(
   planDocId: string,
-  cisloZarizeni: string
+  cisloZarizeni: string,
+  kolekce: KolekceRevizi
 ): Promise<VysledekMazaniNeaktivniho> {
-  const planRef = doc(db, "planovane_revize", planDocId);
+  const planRef = doc(db, kolekce.plan, planDocId);
   const planSnap = await getDoc(planRef);
   if (!planSnap.exists()) {
     return { planSmazan: false, smazanoZaznamu: 0, smazanoSouboru: 0 };
@@ -285,16 +399,16 @@ export async function smazNeaktivniZarizeni(
   await deleteDoc(planRef);
 
   const zbyleSnap = await getDocs(
-    query(collection(db, "planovane_revize"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", cisloZarizeni))
   );
   if (!zbyleSnap.empty) {
     return { planSmazan: true, smazanoZaznamu: 0, smazanoSouboru: 0 };
   }
 
   const revSnap = await getDocs(
-    query(collection(db, "revizni_zpravy"), where("cislo_zarizeni", "==", cisloZarizeni))
+    query(collection(db, kolekce.zpravy), where("cislo_zarizeni", "==", cisloZarizeni))
   );
-  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(revSnap.docs);
+  const { smazanoZaznamu, smazanoSouboru } = await smazZpravy(revSnap.docs, kolekce);
 
   return { planSmazan: true, smazanoZaznamu, smazanoSouboru };
 }

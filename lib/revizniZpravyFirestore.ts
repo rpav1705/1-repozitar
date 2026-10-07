@@ -1,5 +1,6 @@
 import { Timestamp } from "firebase/firestore";
 import { ParsedRevizniZprava } from "@/lib/pdfRevizniZprava";
+import { DruhRevize } from "@/lib/druhRevize";
 
 /**
  * Pole ukládaná do kolekce "revizni_zpravy" pro jednu naparsovanou revizní
@@ -23,6 +24,19 @@ export function revizniZpravaToFirestoreFields(zprava: ParsedRevizniZprava) {
     zjistena_zavada: zprava.zjistena_zavada,
     technik_jmeno: zprava.technik_jmeno,
     technik_cislo_opravneni: zprava.technik_cislo_opravneni,
+    // Jen u zpráv, které druh revize uvádějí (tlakové nádoby) – elektro
+    // dokumenty zůstávají beze změny, bez nového pole.
+    ...(zprava.druh_revize ? { druh_revize: zprava.druh_revize } : {}),
+    // Další naplánované revize jiných druhů uvedené v protokolu – viz
+    // dosadDalsiTerminy v lib/revizniZpravyHistorie.ts.
+    ...(zprava.dalsi_terminy && zprava.dalsi_terminy.length > 0
+      ? {
+          dalsi_terminy: zprava.dalsi_terminy.map((t) => ({
+            druh: t.druh,
+            termin: Timestamp.fromDate(t.termin),
+          })),
+        }
+      : {}),
   };
 }
 
@@ -68,11 +82,19 @@ export function sanitizeDocId(raw: string): string {
  * toho, kde kód zrovna běží – přesně tenhle nesoulad u zařízení 212261
  * způsobil, že appka spočítala pro STEJNÉ nominální datum dvě různá ID.
  */
-export function revizniZpravaDocId(cisloZarizeni: string, datumProvedeni: Date): string {
+export function revizniZpravaDocId(
+  cisloZarizeni: string,
+  datumProvedeni: Date,
+  druhRevize?: DruhRevize | null
+): string {
   const cisloId = sanitizeDocId(cisloZarizeni);
   if (!cisloId) return "";
   const rok = datumProvedeni.getUTCFullYear();
   const mesic = String(datumProvedeni.getUTCMonth() + 1).padStart(2, "0");
   const den = String(datumProvedeni.getUTCDate()).padStart(2, "0");
-  return `${cisloId}_${rok}-${mesic}-${den}`;
+  // Druh revize je součástí ID, ať se provozní revize a vnitřní revize téhož
+  // zařízení ze STEJNÉHO dne vzájemně nepřepsaly. Bez druhu (elektro) zůstává
+  // ID přesně jako dřív.
+  const druh = druhRevize ? `_${druhRevize}` : "";
+  return `${cisloId}_${rok}-${mesic}-${den}${druh}`;
 }

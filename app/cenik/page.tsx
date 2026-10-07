@@ -28,8 +28,8 @@ import {
 } from "@/lib/pdfCenik";
 import { sanitizeDocId } from "@/lib/revizniZpravyFirestore";
 import { parseCenikXlsx } from "@/lib/xlsxCenik";
+import { useTypRevize } from "@/lib/TypRevizeContext";
 
-const CENIK_COLLECTION = "cenik";
 const BATCH_SIZE = 500;
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -99,6 +99,7 @@ type UlozenaCenaExisting = {
  * (vyresitCenikSoubory), appka tady jen parsuje soubory a zobrazuje náhled.
  */
 function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
+  const { kolekce } = useTypRevize();
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "parsing" | "parsed" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
@@ -166,7 +167,7 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
       // přepíše starou JEN pokud je z novější nabídky (viz komentář u
       // vyresitCenikSoubory v lib/pdfCenik.ts), ať omylem nahraná stará
       // nabídka nepřepíše mezitím už uloženou novější cenu.
-      const existingSnap = await getDocs(collection(db, CENIK_COLLECTION));
+      const existingSnap = await getDocs(collection(db, kolekce.cenik));
       const existing = new Map<string, UlozenaCenaExisting>();
       existingSnap.docs.forEach((d) => {
         const data = d.data();
@@ -190,7 +191,7 @@ function CenikUpload({ onUlozeno }: { onUlozeno: () => void }) {
         skupina.forEach((p) => {
           const id = sanitizeDocId(p.cislo_zarizeni);
           if (!id) return;
-          const ref = doc(db, CENIK_COLLECTION, id);
+          const ref = doc(db, kolekce.cenik, id);
           batch.set(ref, {
             cislo_zarizeni: p.cislo_zarizeni,
             popis: p.popis,
@@ -367,6 +368,7 @@ type CenikRow = {
 };
 
 function useCenik(reloadKey: number) {
+  const { kolekce } = useTypRevize();
   const [rows, setRows] = useState<CenikRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -378,7 +380,7 @@ function useCenik(reloadKey: number) {
       setLoading(true);
       setError("");
       try {
-        const snap = await getDocs(query(collection(db, CENIK_COLLECTION), orderBy("cislo_zarizeni", "asc")));
+        const snap = await getDocs(query(collection(db, kolekce.cenik), orderBy("cislo_zarizeni", "asc")));
         if (cancelled) return;
         const loaded: CenikRow[] = snap.docs.map((d) => {
           const data = d.data();
@@ -407,7 +409,7 @@ function useCenik(reloadKey: number) {
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, [reloadKey, kolekce]);
 
   return { rows, loading, error };
 }
@@ -502,7 +504,6 @@ function CenikPrehled({
   );
 }
 
-const PLAN_COLLECTION = "planovane_revize";
 // Stejný bezpečnostní strop jako u hlavního přehledu (viz TABLE_LIMIT v
 // app/page.tsx) – appka zařízení pro měsíční náklady čte v jednom dotazu.
 const PLAN_TABLE_LIMIT = 5000;
@@ -513,6 +514,7 @@ type PlanTerminRow = {
 };
 
 function usePlanTerminy() {
+  const { kolekce } = useTypRevize();
   const [rows, setRows] = useState<PlanTerminRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -525,7 +527,7 @@ function usePlanTerminy() {
       setError("");
       try {
         const snap = await getDocs(
-          query(collection(db, PLAN_COLLECTION), orderBy("termin", "asc"), limit(PLAN_TABLE_LIMIT))
+          query(collection(db, kolekce.plan), orderBy("termin", "asc"), limit(PLAN_TABLE_LIMIT))
         );
         if (cancelled) return;
         const loaded: PlanTerminRow[] = [];
@@ -551,7 +553,7 @@ function usePlanTerminy() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kolekce]);
 
   return { rows, loading, error };
 }
@@ -701,6 +703,13 @@ function MesicniNaklady({ cenikRows, cenikLoading }: { cenikRows: CenikRow[] | n
 }
 
 export default function CenikPage() {
+  const { typ } = useTypRevize();
+  // key = druh revizí – při přepnutí se celá stránka přemountuje, ať se
+  // nepřenese rozpracovaný výběr souborů/náhled z ceníku jiného druhu.
+  return <CenikStranka key={typ} />;
+}
+
+function CenikStranka() {
   const [reloadKey, setReloadKey] = useState(0);
   const { rows: cenikRows, loading: cenikLoading, error: cenikError } = useCenik(reloadKey);
   const { user } = useAuth();

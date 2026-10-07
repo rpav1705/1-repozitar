@@ -67,6 +67,20 @@ function isDateHeader(h: string): boolean {
   return /nejblizsi.*splatnosti|predpoklad.*dokonc|planovane.*dokonc|datum.*dokonc|^termin/.test(h);
 }
 
+/**
+ * Maximo u revizí, které se ještě nikdy neprováděly, v plánu drží zástupné
+ * datum v roce 19xx (např. 30.11.1931 u pětileté revize) – skutečný zamýšlený
+ * rok je 20xx se stejnými posledními dvěma číslicemi (2031). Rok 1900–1999
+ * se proto při importu VŽDY přepíše o 100 let výš (den a měsíc zůstávají),
+ * ať se zástupné datum neukáže jako dávno prošlý termín.
+ */
+function opravRok19xx(datum: Date | null): Date | null {
+  if (!datum) return datum;
+  const rok = datum.getUTCFullYear();
+  if (rok < 1900 || rok > 1999) return datum;
+  return new Date(Date.UTC(rok + 100, datum.getUTCMonth(), datum.getUTCDate()));
+}
+
 function isFrequencyUnitHeader(h: string): boolean {
   return /jednotk.*frekvenc|frekvenc.*jednotk/.test(h);
 }
@@ -140,7 +154,7 @@ export function parsePlanWorkbook(data: ArrayBuffer): ParsePlanResult {
       extractEquipmentNumber(puvodniRaw) ??
       (puvodniRaw || aktivumRaw || "");
 
-    const termin = parseFlexibleDate(row[dateIndex]);
+    const termin = opravRok19xx(parseFlexibleDate(row[dateIndex]));
     const popis = cellText(row[assetDescIndex ?? fallbackDescIndex]) || codeRaw;
     const frekvenceRaw = frequencyIndex >= 0 ? row[frequencyIndex] : null;
     const frekvence =
