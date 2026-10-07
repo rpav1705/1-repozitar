@@ -26,6 +26,8 @@ export type RevizniZpravaRadek = {
   stranka: number;
   /** Druh revize ze zprávy (tlakové nádoby) – viz lib/druhRevize.ts; bez něj chybí/null. */
   druh_revize?: string | null;
+  /** Odkaz na PDF ve Storage – appka ho v detailu rovnou nabídne jako proklik. */
+  pdf_url?: string | null;
 };
 
 export type PlanovanaRevizeRadek = {
@@ -41,17 +43,20 @@ export type DetailViceShod = {
   seznam_pu: string[];
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
 
 export type DetailBezShody = {
   cislo_zarizeni: string;
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
 
 export type DetailChybiCislo = {
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
 
 /** Kolik položek appka u jedné skupiny v odpovědi API maximálně vrátí – u
@@ -101,7 +106,7 @@ export function analyzujNesparovaneZpravy(
 
   for (const z of zpravy) {
     if (!z.cislo_zarizeni) {
-      chybiCislo.push({ soubor: z.soubor_nazev, stranka: z.stranka });
+      chybiCislo.push({ soubor: z.soubor_nazev, stranka: z.stranka, pdf_url: z.pdf_url ?? null });
       continue;
     }
     // Zpráva s druhem revize se páruje jen na řádek plánu odpovídající
@@ -114,7 +119,12 @@ export function analyzujNesparovaneZpravy(
       : planyZarizeni;
     const seznamPu = odpovidajici.map((p) => p.pu);
     if (seznamPu.length === 0) {
-      bezShody.push({ cislo_zarizeni: z.cislo_zarizeni, soubor: z.soubor_nazev, stranka: z.stranka });
+      bezShody.push({
+        cislo_zarizeni: z.cislo_zarizeni,
+        soubor: z.soubor_nazev,
+        stranka: z.stranka,
+        pdf_url: z.pdf_url ?? null,
+      });
     } else if (seznamPu.length > 1) {
       viceShod.push({
         cislo_zarizeni: z.cislo_zarizeni,
@@ -122,6 +132,7 @@ export function analyzujNesparovaneZpravy(
         seznam_pu: seznamPu,
         soubor: z.soubor_nazev,
         stranka: z.stranka,
+        pdf_url: z.pdf_url ?? null,
       });
     }
   }

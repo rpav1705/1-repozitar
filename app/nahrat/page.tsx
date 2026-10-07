@@ -2150,18 +2150,37 @@ type AnalyzaDetailViceShod = {
   seznam_pu: string[];
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
 
 type AnalyzaDetailBezShody = {
   cislo_zarizeni: string;
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
 
 type AnalyzaDetailChybiCislo = {
   soubor: string;
   stranka: number;
+  pdf_url: string | null;
 };
+
+/** Název souboru zprávy jako proklik na PDF, pokud appka odkaz má (viz pdf_url). */
+function OdkazNaSoubor({ soubor, pdfUrl }: { soubor: string; pdfUrl: string | null }) {
+  if (!soubor) return <>—</>;
+  if (!pdfUrl) return <>{soubor}</>;
+  return (
+    <a
+      href={pdfUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-accent hover:underline"
+    >
+      {soubor}
+    </a>
+  );
+}
 
 type AnalyzaVysledek = {
   cas: Date;
@@ -2247,7 +2266,9 @@ function AnalyzaTabulkaViceShod({
               <td className="py-1 pr-3">{d.cislo_zarizeni || "(bez čísla)"}</td>
               <td className="py-1 pr-3">{d.pocet_pu}</td>
               <td className="py-1 pr-3">{d.seznam_pu.filter(Boolean).join(", ") || "—"}</td>
-              <td className="py-1 pr-3">{d.soubor || "—"}</td>
+              <td className="py-1 pr-3">
+                <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
+              </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
             </tr>
           ))}
@@ -2279,7 +2300,9 @@ function AnalyzaTabulkaBezShody({
           {detaily.map((d, i) => (
             <tr key={i} className="border-b border-gray-100">
               <td className="py-1 pr-3">{d.cislo_zarizeni || "(bez čísla)"}</td>
-              <td className="py-1 pr-3">{d.soubor || "—"}</td>
+              <td className="py-1 pr-3">
+                <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
+              </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
             </tr>
           ))}
@@ -2309,7 +2332,9 @@ function AnalyzaTabulkaChybiCislo({
         <tbody>
           {detaily.map((d, i) => (
             <tr key={i} className="border-b border-gray-100">
-              <td className="py-1 pr-3">{d.soubor || "—"}</td>
+              <td className="py-1 pr-3">
+                <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
+              </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
             </tr>
           ))}

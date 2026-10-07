@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
     const [zpravySnap, planySnap] = await Promise.all([
       db
         .collection(kolekce.zpravy)
-        .select("cislo_zarizeni", "soubor_nazev", "stranka", "druh_revize")
+        .select("cislo_zarizeni", "soubor_nazev", "stranka", "druh_revize", "pdf_url")
         .get(),
       db.collection(kolekce.plan).select("cislo_zarizeni", "pu", "frekvence").get(),
     ]);
@@ -70,6 +70,7 @@ export async function GET(request: NextRequest) {
         soubor_nazev: typeof data.soubor_nazev === "string" ? data.soubor_nazev : "",
         stranka: typeof data.stranka === "number" ? data.stranka : 0,
         druh_revize: typeof data.druh_revize === "string" ? data.druh_revize : null,
+        pdf_url: typeof data.pdf_url === "string" ? data.pdf_url : null,
       };
     });
 
