@@ -2145,6 +2145,7 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
 const ANALYZA_NESPAROVANYCH_URL = "/api/analyza-nesparovanych-zprav";
 
 type AnalyzaDetailViceShod = {
+  id: string;
   cislo_zarizeni: string;
   pocet_pu: number;
   seznam_pu: string[];
@@ -2154,6 +2155,7 @@ type AnalyzaDetailViceShod = {
 };
 
 type AnalyzaDetailBezShody = {
+  id: string;
   cislo_zarizeni: string;
   soubor: string;
   stranka: number;
@@ -2161,10 +2163,41 @@ type AnalyzaDetailBezShody = {
 };
 
 type AnalyzaDetailChybiCislo = {
+  id: string;
   soubor: string;
   stranka: number;
   pdf_url: string | null;
 };
+
+/**
+ * Tlačítko "Ignorovat" u řádku v analýze nespárovaných zpráv – appka zprávě
+ * nastaví "ignorovano: true" přímo ve Firestore (viz lib/analyzaNesparovanychZprav.ts),
+ * ať v analýze přestane navždy vadit (typicky zařízení INACTIVE odjakživa v
+ * Maximu, co appka nikdy nemazala, viz smazNeaktivniZarizeni). Zmizí z
+ * výpisu hned po kliknutí (appka si ho odebere z místního stavu), appka si
+ * znovu nespouští celou analýzu jen kvůli jedné položce.
+ */
+function TlacitkoIgnorovat({
+  id,
+  probiha,
+  onClick,
+}: {
+  id: string;
+  probiha: boolean;
+  onClick: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(id)}
+      disabled={probiha}
+      title="Označí zprávu jako vyřešenou/záměrně nespárovanou – zmizí z téhle analýzy."
+      className="text-[11px] font-semibold text-gray-500 hover:text-navy disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {probiha ? "Ukládám…" : "Ignorovat"}
+    </button>
+  );
+}
 
 /** Název souboru zprávy jako proklik na PDF, pokud appka odkaz má (viz pdf_url). */
 function OdkazNaSoubor({ soubor, pdfUrl }: { soubor: string; pdfUrl: string | null }) {
@@ -2244,9 +2277,13 @@ function ZobrazenoZCelku({ zobrazeno, celkem }: { zobrazeno: number; celkem: num
 function AnalyzaTabulkaViceShod({
   pocet,
   detaily,
+  probihaId,
+  onIgnorovat,
 }: {
   pocet: number;
   detaily: AnalyzaDetailViceShod[];
+  probihaId: string | null;
+  onIgnorovat: (id: string) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border border-gray-100 bg-gray-50 px-3 py-2">
@@ -2258,6 +2295,7 @@ function AnalyzaTabulkaViceShod({
             <th className="py-1 pr-3 font-semibold">PÚ</th>
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
         <tbody>
@@ -2270,6 +2308,9 @@ function AnalyzaTabulkaViceShod({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-right">
+                <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -2282,9 +2323,13 @@ function AnalyzaTabulkaViceShod({
 function AnalyzaTabulkaBezShody({
   pocet,
   detaily,
+  probihaId,
+  onIgnorovat,
 }: {
   pocet: number;
   detaily: AnalyzaDetailBezShody[];
+  probihaId: string | null;
+  onIgnorovat: (id: string) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border border-gray-100 bg-gray-50 px-3 py-2">
@@ -2294,6 +2339,7 @@ function AnalyzaTabulkaBezShody({
             <th className="py-1 pr-3 font-semibold">Číslo zařízení</th>
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
         <tbody>
@@ -2304,6 +2350,9 @@ function AnalyzaTabulkaBezShody({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-right">
+                <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -2316,9 +2365,13 @@ function AnalyzaTabulkaBezShody({
 function AnalyzaTabulkaChybiCislo({
   pocet,
   detaily,
+  probihaId,
+  onIgnorovat,
 }: {
   pocet: number;
   detaily: AnalyzaDetailChybiCislo[];
+  probihaId: string | null;
+  onIgnorovat: (id: string) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border border-gray-100 bg-gray-50 px-3 py-2">
@@ -2327,6 +2380,7 @@ function AnalyzaTabulkaChybiCislo({
           <tr className="border-b border-gray-200 text-gray-500">
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
         <tbody>
@@ -2336,6 +2390,9 @@ function AnalyzaTabulkaChybiCislo({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-right">
+                <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -2361,6 +2418,52 @@ function NesparovaneZpravySection() {
   const [vysledek, setVysledek] = useState<AnalyzaVysledek | null>(null);
   const [chyba, setChyba] = useState("");
   const [otevrenaSkupina, setOtevrenaSkupina] = useState<AnalyzaSkupina | null>(null);
+  const [probihaId, setProbihaId] = useState<string | null>(null);
+
+  /**
+   * Nastaví zprávě "ignorovano: true" přímo ve Firestore (appka má na
+   * kolekci "revizni_zpravy" běžné oprávnění k zápisu jako kterýkoli
+   * přihlášený uživatel, viz Firestore rules – není potřeba zvláštní API
+   * route). Z místního výsledku appka zprávu rovnou odebere, ať to je vidět
+   * okamžitě – nespouští kvůli jedné položce znovu celou (pomalou) analýzu.
+   */
+  const oznacitIgnorovano = async (id: string) => {
+    setProbihaId(id);
+    try {
+      await updateDoc(doc(db, kolekce.zpravy, id), {
+        ignorovano: true,
+        ignorovano_kym: user?.email ?? null,
+        ignorovano_kdy: Timestamp.fromDate(new Date()),
+      });
+      setVysledek((v) => {
+        if (!v) return v;
+        const odeber = <T extends { id: string }>(skupina: { pocet: number; detaily: T[] }) => {
+          const noveDetaily = skupina.detaily.filter((d) => d.id !== id);
+          const odebrano = noveDetaily.length < skupina.detaily.length;
+          return { skupina: { pocet: odebrano ? skupina.pocet - 1 : skupina.pocet, detaily: noveDetaily }, odebrano };
+        };
+        const vs = odeber(v.viceShod);
+        const bs = odeber(v.bezShody);
+        const cc = odeber(v.chybiCisloZarizeni);
+        const odebranoCelkem = [vs, bs, cc].filter((r) => r.odebrano).length;
+        return {
+          ...v,
+          celkemNesparovanych: v.celkemNesparovanych - odebranoCelkem,
+          viceShod: vs.skupina,
+          bezShody: bs.skupina,
+          chybiCisloZarizeni: cc.skupina,
+        };
+      });
+    } catch (err) {
+      window.alert(
+        `Zprávu se nepodařilo označit jako ignorovanou: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    } finally {
+      setProbihaId(null);
+    }
+  };
 
   const spustitAnalyzu = async () => {
     setStav("nacitam");
@@ -2471,7 +2574,12 @@ function NesparovaneZpravySection() {
                 }
               />
               {otevrenaSkupina === "vice_shod" && (
-                <AnalyzaTabulkaViceShod pocet={vysledek.viceShod.pocet} detaily={vysledek.viceShod.detaily} />
+                <AnalyzaTabulkaViceShod
+                  pocet={vysledek.viceShod.pocet}
+                  detaily={vysledek.viceShod.detaily}
+                  probihaId={probihaId}
+                  onIgnorovat={oznacitIgnorovano}
+                />
               )}
 
               <AnalyzaSkupinaTlacitko
@@ -2483,7 +2591,12 @@ function NesparovaneZpravySection() {
                 }
               />
               {otevrenaSkupina === "bez_shody" && (
-                <AnalyzaTabulkaBezShody pocet={vysledek.bezShody.pocet} detaily={vysledek.bezShody.detaily} />
+                <AnalyzaTabulkaBezShody
+                  pocet={vysledek.bezShody.pocet}
+                  detaily={vysledek.bezShody.detaily}
+                  probihaId={probihaId}
+                  onIgnorovat={oznacitIgnorovano}
+                />
               )}
 
               {vysledek.chybiCisloZarizeni.pocet > 0 && (
@@ -2500,6 +2613,8 @@ function NesparovaneZpravySection() {
                     <AnalyzaTabulkaChybiCislo
                       pocet={vysledek.chybiCisloZarizeni.pocet}
                       detaily={vysledek.chybiCisloZarizeni.detaily}
+                      probihaId={probihaId}
+                      onIgnorovat={oznacitIgnorovano}
                     />
                   )}
                 </>

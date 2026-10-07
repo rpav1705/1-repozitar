@@ -21,6 +21,8 @@
 import { jeDruhRevize, planOdpovidaDruhu } from "./druhRevize";
 
 export type RevizniZpravaRadek = {
+  /** ID dokumentu v "revizni_zpravy" – appka ho potřebuje k ručnímu označení "ignorováno". */
+  id: string;
   cislo_zarizeni: string;
   soubor_nazev: string;
   stranka: number;
@@ -28,6 +30,14 @@ export type RevizniZpravaRadek = {
   druh_revize?: string | null;
   /** Odkaz na PDF ve Storage – appka ho v detailu rovnou nabídne jako proklik. */
   pdf_url?: string | null;
+  /**
+   * Ručně potvrzeno uživatelem appky jako "o tomhle vím, nepáruje se
+   * záměrně" (typicky zařízení INACTIVE odjakživa v Maximu – appka takové
+   * nikdy nemazala, viz smazNeaktivniZarizeni v lib/revizniZpravyHistorie.ts,
+   * takže by jinak navždy viselo v "bez shody"). Appka takovou zprávu do
+   * žádné ze tří skupin nezapočítává.
+   */
+  ignorovano?: boolean;
 };
 
 export type PlanovanaRevizeRadek = {
@@ -38,6 +48,7 @@ export type PlanovanaRevizeRadek = {
 };
 
 export type DetailViceShod = {
+  id: string;
   cislo_zarizeni: string;
   pocet_pu: number;
   seznam_pu: string[];
@@ -47,6 +58,7 @@ export type DetailViceShod = {
 };
 
 export type DetailBezShody = {
+  id: string;
   cislo_zarizeni: string;
   soubor: string;
   stranka: number;
@@ -54,6 +66,7 @@ export type DetailBezShody = {
 };
 
 export type DetailChybiCislo = {
+  id: string;
   soubor: string;
   stranka: number;
   pdf_url: string | null;
@@ -105,8 +118,14 @@ export function analyzujNesparovaneZpravy(
   const chybiCislo: DetailChybiCislo[] = [];
 
   for (const z of zpravy) {
+    if (z.ignorovano) continue;
     if (!z.cislo_zarizeni) {
-      chybiCislo.push({ soubor: z.soubor_nazev, stranka: z.stranka, pdf_url: z.pdf_url ?? null });
+      chybiCislo.push({
+        id: z.id,
+        soubor: z.soubor_nazev,
+        stranka: z.stranka,
+        pdf_url: z.pdf_url ?? null,
+      });
       continue;
     }
     // Zpráva s druhem revize se páruje jen na řádek plánu odpovídající
@@ -120,6 +139,7 @@ export function analyzujNesparovaneZpravy(
     const seznamPu = odpovidajici.map((p) => p.pu);
     if (seznamPu.length === 0) {
       bezShody.push({
+        id: z.id,
         cislo_zarizeni: z.cislo_zarizeni,
         soubor: z.soubor_nazev,
         stranka: z.stranka,
@@ -127,6 +147,7 @@ export function analyzujNesparovaneZpravy(
       });
     } else if (seznamPu.length > 1) {
       viceShod.push({
+        id: z.id,
         cislo_zarizeni: z.cislo_zarizeni,
         pocet_pu: seznamPu.length,
         seznam_pu: seznamPu,
