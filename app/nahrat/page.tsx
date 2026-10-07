@@ -9,6 +9,7 @@ import { useUserRole } from "@/lib/useUserRole";
 import { db, storage } from "@/lib/firebase";
 import {
   collection,
+  deleteField,
   doc,
   DocumentData,
   getDocs,
@@ -2169,6 +2170,14 @@ type AnalyzaDetailChybiCislo = {
   pdf_url: string | null;
 };
 
+type AnalyzaDetailIgnorovane = {
+  id: string;
+  cislo_zarizeni: string;
+  soubor: string;
+  stranka: number;
+  pdf_url: string | null;
+};
+
 /**
  * Tlačítko "Ignorovat" u řádku v analýze nespárovaných zpráv – appka zprávě
  * nastaví "ignorovano: true" přímo ve Firestore (viz lib/analyzaNesparovanychZprav.ts),
@@ -2199,6 +2208,36 @@ function TlacitkoIgnorovat({
   );
 }
 
+/**
+ * Opak TlacitkoIgnorovat – u řádku ve skupině "Ignorováno" appka zprávě
+ * zruší "ignorovano" (a s ním i "ignorovano_kym"/"ignorovano_kdy"), ať se
+ * příští analýzou zase zařadí do správného důvodu nespárování. Appka ho
+ * nabízí schválně, ať označení "Ignorovat" nikdy není jednosměrné – uživatel/
+ * ka appky si dřív nemusel/a uvědomit, že zpráva tím zmizí BEZ možnosti ji
+ * v appce najít zpátky.
+ */
+function TlacitkoVratitZpet({
+  id,
+  probiha,
+  onClick,
+}: {
+  id: string;
+  probiha: boolean;
+  onClick: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(id)}
+      disabled={probiha}
+      title="Zruší označení 'ignorováno' – zpráva se vrátí do analýzy nespárovaných zpráv."
+      className="text-[11px] font-semibold text-gray-500 hover:text-navy disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {probiha ? "Ukládám…" : "Vrátit zpět"}
+    </button>
+  );
+}
+
 /** Název souboru zprávy jako proklik na PDF, pokud appka odkaz má (viz pdf_url). */
 function OdkazNaSoubor({ soubor, pdfUrl }: { soubor: string; pdfUrl: string | null }) {
   if (!soubor) return <>—</>;
@@ -2223,9 +2262,10 @@ type AnalyzaVysledek = {
   viceShod: { pocet: number; detaily: AnalyzaDetailViceShod[] };
   bezShody: { pocet: number; detaily: AnalyzaDetailBezShody[] };
   chybiCisloZarizeni: { pocet: number; detaily: AnalyzaDetailChybiCislo[] };
+  ignorovane: { pocet: number; detaily: AnalyzaDetailIgnorovane[] };
 };
 
-type AnalyzaSkupina = "vice_shod" | "bez_shody" | "chybi_cislo";
+type AnalyzaSkupina = "vice_shod" | "bez_shody" | "chybi_cislo" | "ignorovane";
 
 /** Rozklikávací tlačítko jedné skupiny důvodů (appka detail vždycky ukazuje
  *  inline v tabulce, ne v modálu/tooltipu). */
@@ -2402,6 +2442,48 @@ function AnalyzaTabulkaChybiCislo({
   );
 }
 
+function AnalyzaTabulkaIgnorovane({
+  pocet,
+  detaily,
+  probihaId,
+  onVratitZpet,
+}: {
+  pocet: number;
+  detaily: AnalyzaDetailIgnorovane[];
+  probihaId: string | null;
+  onVratitZpet: (id: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-md border border-gray-100 bg-gray-50 px-3 py-2">
+      <table className="w-full text-left text-[12px]">
+        <thead>
+          <tr className="border-b border-gray-200 text-gray-500">
+            <th className="py-1 pr-3 font-semibold">Číslo zařízení</th>
+            <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
+            <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {detaily.map((d, i) => (
+            <tr key={i} className="border-b border-gray-100">
+              <td className="py-1 pr-3">{d.cislo_zarizeni || "(bez čísla)"}</td>
+              <td className="py-1 pr-3">
+                <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
+              </td>
+              <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-right">
+                <TlacitkoVratitZpet id={d.id} probiha={probihaId === d.id} onClick={onVratitZpet} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <ZobrazenoZCelku zobrazeno={detaily.length} celkem={pocet} />
+    </div>
+  );
+}
+
 /**
  * Tlačítko "Analýza nepřiřazených revizních zpráv" – porovnání
  * "revizni_zpravy" vs. "planovane_revize" nad TISÍCI záznamů appka počítá
@@ -2424,8 +2506,12 @@ function NesparovaneZpravySection() {
    * Nastaví zprávě "ignorovano: true" přímo ve Firestore (appka má na
    * kolekci "revizni_zpravy" běžné oprávnění k zápisu jako kterýkoli
    * přihlášený uživatel, viz Firestore rules – není potřeba zvláštní API
-   * route). Z místního výsledku appka zprávu rovnou odebere, ať to je vidět
-   * okamžitě – nespouští kvůli jedné položce znovu celou (pomalou) analýzu.
+   * route). Z místního výsledku appka zprávu rovnou PŘESUNE do skupiny
+   * "ignorovane" (ne jen potichu smaže!), ať ji jde v appce hned i vrátit
+   * zpět tlačítkem "Vrátit zpět" – appka dřív zprávu po "Ignorovat" prostě
+   * schovala úplně beze stopy, což uživatele appky zmátlo (zpráva "zmizela"
+   * a nešla v appce najít zpátky). Nespouští kvůli jedné položce znovu
+   * celou (pomalou) analýzu.
    */
   const oznacitIgnorovano = async (id: string) => {
     setProbihaId(id);
@@ -2437,7 +2523,20 @@ function NesparovaneZpravySection() {
       });
       setVysledek((v) => {
         if (!v) return v;
-        const odeber = <T extends { id: string }>(skupina: { pocet: number; detaily: T[] }) => {
+        let presunuta: AnalyzaDetailIgnorovane | null = null;
+        const odeber = <T extends { id: string; cislo_zarizeni?: string; soubor: string; stranka: number; pdf_url: string | null }>(
+          skupina: { pocet: number; detaily: T[] }
+        ) => {
+          const nalezena = skupina.detaily.find((d) => d.id === id);
+          if (nalezena && !presunuta) {
+            presunuta = {
+              id: nalezena.id,
+              cislo_zarizeni: nalezena.cislo_zarizeni ?? "",
+              soubor: nalezena.soubor,
+              stranka: nalezena.stranka,
+              pdf_url: nalezena.pdf_url,
+            };
+          }
           const noveDetaily = skupina.detaily.filter((d) => d.id !== id);
           const odebrano = noveDetaily.length < skupina.detaily.length;
           return { skupina: { pocet: odebrano ? skupina.pocet - 1 : skupina.pocet, detaily: noveDetaily }, odebrano };
@@ -2452,6 +2551,9 @@ function NesparovaneZpravySection() {
           viceShod: vs.skupina,
           bezShody: bs.skupina,
           chybiCisloZarizeni: cc.skupina,
+          ignorovane: presunuta
+            ? { pocet: v.ignorovane.pocet + 1, detaily: [presunuta, ...v.ignorovane.detaily] }
+            : v.ignorovane,
         };
       });
     } catch (err) {
@@ -2459,6 +2561,40 @@ function NesparovaneZpravySection() {
         `Zprávu se nepodařilo označit jako ignorovanou: ${
           err instanceof Error ? err.message : String(err)
         }`
+      );
+    } finally {
+      setProbihaId(null);
+    }
+  };
+
+  /**
+   * Opak oznacitIgnorovano – zruší "ignorovano" a odebere jeho audit pole
+   * (appka je po vrácení zpátky do analýzy už nepotřebuje, viz
+   * TlacitkoVratitZpet). Zprávu appka jen odebere ze skupiny "ignorovane" v
+   * místním stavu – do kterého přesného důvodu nespárování patří teď, se
+   * pozná až dalším spuštěním analýzy (appka to tady nepřepočítává znovu
+   * nad celým plánem jen kvůli jedné položce).
+   */
+  const vratitZpet = async (id: string) => {
+    setProbihaId(id);
+    try {
+      await updateDoc(doc(db, kolekce.zpravy, id), {
+        ignorovano: deleteField(),
+        ignorovano_kym: deleteField(),
+        ignorovano_kdy: deleteField(),
+      });
+      setVysledek((v) => {
+        if (!v) return v;
+        const noveDetaily = v.ignorovane.detaily.filter((d) => d.id !== id);
+        const odebrano = noveDetaily.length < v.ignorovane.detaily.length;
+        return {
+          ...v,
+          ignorovane: { pocet: odebrano ? v.ignorovane.pocet - 1 : v.ignorovane.pocet, detaily: noveDetaily },
+        };
+      });
+    } catch (err) {
+      window.alert(
+        `Zprávu se nepodařilo vrátit zpět: ${err instanceof Error ? err.message : String(err)}`
       );
     } finally {
       setProbihaId(null);
@@ -2615,6 +2751,27 @@ function NesparovaneZpravySection() {
                       detaily={vysledek.chybiCisloZarizeni.detaily}
                       probihaId={probihaId}
                       onIgnorovat={oznacitIgnorovano}
+                    />
+                  )}
+                </>
+              )}
+
+              {vysledek.ignorovane.pocet > 0 && (
+                <>
+                  <AnalyzaSkupinaTlacitko
+                    label="Ignorováno (ručně potvrzeno jako vyřešené)"
+                    pocet={vysledek.ignorovane.pocet}
+                    otevreno={otevrenaSkupina === "ignorovane"}
+                    onToggle={() =>
+                      setOtevrenaSkupina((s) => (s === "ignorovane" ? null : "ignorovane"))
+                    }
+                  />
+                  {otevrenaSkupina === "ignorovane" && (
+                    <AnalyzaTabulkaIgnorovane
+                      pocet={vysledek.ignorovane.pocet}
+                      detaily={vysledek.ignorovane.detaily}
+                      probihaId={probihaId}
+                      onVratitZpet={vratitZpet}
                     />
                   )}
                 </>

@@ -34,8 +34,10 @@ export type RevizniZpravaRadek = {
    * Ručně potvrzeno uživatelem appky jako "o tomhle vím, nepáruje se
    * záměrně" (typicky zařízení INACTIVE odjakživa v Maximu – appka takové
    * nikdy nemazala, viz smazNeaktivniZarizeni v lib/revizniZpravyHistorie.ts,
-   * takže by jinak navždy viselo v "bez shody"). Appka takovou zprávu do
-   * žádné ze tří skupin nezapočítává.
+   * takže by jinak navždy viselo v "bez shody"). Appka takovou zprávu
+   * nezařazuje do žádného z důvodů nespárování, ale ukáže ji zvlášť ve
+   * skupině "ignorovane" (ne úplně skrytou – appka musí umět ukázat zpět,
+   * co bylo takhle označené, a nabídnout to vrátit, viz DetailIgnorovane).
    */
   ignorovano?: boolean;
 };
@@ -72,6 +74,14 @@ export type DetailChybiCislo = {
   pdf_url: string | null;
 };
 
+export type DetailIgnorovane = {
+  id: string;
+  cislo_zarizeni: string;
+  soubor: string;
+  stranka: number;
+  pdf_url: string | null;
+};
+
 /** Kolik položek appka u jedné skupiny v odpovědi API maximálně vrátí – u
  *  velkých dávek (tisíce zpráv) by jinak JSON odpověď zbytečně narostla, i
  *  když se v appce stejně zobrazuje jen omezený náhled. Souhrnný POČET
@@ -85,6 +95,10 @@ export type VysledekAnalyzyNesparovanych = {
   viceShod: { pocet: number; detaily: DetailViceShod[] };
   bezShody: { pocet: number; detaily: DetailBezShody[] };
   chybiCisloZarizeni: { pocet: number; detaily: DetailChybiCislo[] };
+  /** Zprávy ručně označené appkou jako "ignorovano" – appka je ukazuje
+   *  zvlášť (ne jen potichu zmizí), ať je jde v appce kdykoli dohledat a
+   *  tlačítkem "Vrátit zpět" zase zařadit zpět do analýzy. */
+  ignorovane: { pocet: number; detaily: DetailIgnorovane[] };
 };
 
 /**
@@ -99,7 +113,10 @@ export type VysledekAnalyzyNesparovanych = {
  *    zařízení (nemělo by nastat u úspěšně naparsované zprávy, appka to ale
  *    pro jistotu taky hlídá, ať se žádná zpráva neztratí beze zmínky).
  * Zprávy s přesně jednou shodou (jednoznačně spárované) se do výsledku
- * nezapočítávají vůbec – ty appka žádnou pozornost nevyžadují.
+ * nezapočítávají vůbec – ty appka žádnou pozornost nevyžadují. Zprávy ručně
+ * označené "ignorovano" se do žádného z těchto tří důvodů nepočítají (appka
+ * je přeskočí už na začátku), ale appka je vrátí zvlášť ve skupině
+ * "ignorovane", ať je uživatel/ka appky má kde dohledat a vrátit zpět.
  */
 export function analyzujNesparovaneZpravy(
   zpravy: RevizniZpravaRadek[],
@@ -116,9 +133,19 @@ export function analyzujNesparovaneZpravy(
   const viceShod: DetailViceShod[] = [];
   const bezShody: DetailBezShody[] = [];
   const chybiCislo: DetailChybiCislo[] = [];
+  const ignorovane: DetailIgnorovane[] = [];
 
   for (const z of zpravy) {
-    if (z.ignorovano) continue;
+    if (z.ignorovano) {
+      ignorovane.push({
+        id: z.id,
+        cislo_zarizeni: z.cislo_zarizeni,
+        soubor: z.soubor_nazev,
+        stranka: z.stranka,
+        pdf_url: z.pdf_url ?? null,
+      });
+      continue;
+    }
     if (!z.cislo_zarizeni) {
       chybiCislo.push({
         id: z.id,
@@ -165,5 +192,6 @@ export function analyzujNesparovaneZpravy(
     viceShod: { pocet: viceShod.length, detaily: viceShod.slice(0, DETAIL_LIMIT) },
     bezShody: { pocet: bezShody.length, detaily: bezShody.slice(0, DETAIL_LIMIT) },
     chybiCisloZarizeni: { pocet: chybiCislo.length, detaily: chybiCislo.slice(0, DETAIL_LIMIT) },
+    ignorovane: { pocet: ignorovane.length, detaily: ignorovane.slice(0, DETAIL_LIMIT) },
   };
 }
