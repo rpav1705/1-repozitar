@@ -693,6 +693,10 @@ type RevizniZpravyImportLog = {
   zpracovanoCelkem: number;
   chybaCelkem: number;
   zarizeni: string[];
+  /** Nerozpoznané stránky/soubory s důvodem (jen běhy z "nahrani", starší záznamy nemají). */
+  nerozpoznano: string[];
+  /** Rozpoznané, ale nespárované zprávy s důvodem. */
+  nesparovano: string[];
 };
 
 type ImportLogsData = {
@@ -788,6 +792,8 @@ function useImportLogs(kolekce: KolekceRevizi) {
             zpracovanoCelkem: typeof pocty.zpracovano === "number" ? pocty.zpracovano : 0,
             chybaCelkem: typeof pocty.chyba === "number" ? pocty.chyba : 0,
             zarizeni: toStringArray(polozky.zarizeni),
+            nerozpoznano: toStringArray(polozky.nerozpoznano),
+            nesparovano: toStringArray(polozky.nesparovano),
           };
         })();
 
@@ -835,7 +841,7 @@ function ImportLogCard({
   title: string;
   cas: Date | null;
   summary: string;
-  detailGroups: { label: string; items: string[] }[];
+  detailGroups: { label: string; items: string[]; dlouhe?: boolean }[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetail = detailGroups.some((g) => g.items.length > 0);
@@ -878,7 +884,7 @@ function ImportLogCard({
                 <div className="font-semibold text-gray-500">
                   {g.label} ({g.items.length})
                 </div>
-                <ul className="mt-1 flex flex-wrap gap-1.5">
+                <ul className={g.dlouhe ? "mt-1 flex flex-col gap-1" : "mt-1 flex flex-wrap gap-1.5"}>
                   {g.items.slice(0, LOG_ITEMS_DISPLAY_LIMIT).map((item, i) => (
                     <li key={i} className="rounded bg-gray-100 px-1.5 py-0.5">
                       {item || "(bez čísla)"}
@@ -1117,7 +1123,11 @@ function DashboardOverview({ userEmail }: { userEmail: string }) {
                   ? "Zatím žádný záznam zpracování – datum poslední nahrané zprávy"
                   : "Zatím žádný záznam"
           }
-          detailGroups={[{ label: "Dotčená čísla zařízení", items: importLogs?.revize?.zarizeni ?? [] }]}
+          detailGroups={[
+            { label: "Dotčená čísla zařízení", items: importLogs?.revize?.zarizeni ?? [] },
+            { label: "Nerozpoznáno (s důvodem)", items: importLogs?.revize?.nerozpoznano ?? [], dlouhe: true },
+            { label: "Nespárováno s plánem (s důvodem)", items: importLogs?.revize?.nesparovano ?? [], dlouhe: true },
+          ]}
         />
       </div>
 

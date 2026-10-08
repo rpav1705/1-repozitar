@@ -949,6 +949,15 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             zpracovano: allProcessed.length,
             chyba: allSkipped.length,
             zarizeni: Array.from(dotcenaZarizeni),
+            nerozpoznano: allSkipped.map(
+              (s) => `${s.soubor}${s.stranka > 0 ? `, strana ${s.stranka}` : ""}: ${s.duvod}`
+            ),
+            nesparovano: allProcessed
+              .filter((p) => p.parovani_duvod)
+              .map(
+                (p) =>
+                  `${p.cislo_zarizeni} (${p.soubor}, strana ${p.stranka}): ${p.parovani_duvod}`
+              ),
           },
           kolekce
         );

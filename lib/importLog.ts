@@ -85,7 +85,18 @@ export type RevizniZpravyImportLogInput = {
   chyba: number;
   /** Čísla zařízení dotčená tímhle během (pro rozklikávací detail). */
   zarizeni: string[];
+  /** Nerozpoznané stránky/soubory i s důvodem, hotové texty "soubor, strana N: důvod". */
+  nerozpoznano?: string[];
+  /** Zprávy rozpoznané, ale nespárované jednoznačně, i s důvodem ("zařízení – soubor, strana N: důvod"). */
+  nesparovano?: string[];
 };
+
+/** Jedna položka s důvodem může být dlouhá (u nerozpoznané stránky i s náhledem obsahu) – oříznutí drží dokument malý. */
+const LOG_DUVOD_MAX_DELKA = 300;
+
+function orizniDelku(items: string[]): string[] {
+  return orizni(items).map((s) => (s.length > LOG_DUVOD_MAX_DELKA ? s.slice(0, LOG_DUVOD_MAX_DELKA) + "…" : s));
+}
 
 /**
  * Zapíše záznam o proběhlém zpracování revizních zpráv – volá se ze všech
@@ -106,6 +117,8 @@ export async function zapisRevizniZpravyImportLog(
     },
     polozky: {
       zarizeni: orizni(input.zarizeni),
+      nerozpoznano: orizniDelku(input.nerozpoznano ?? []),
+      nesparovano: orizniDelku(input.nesparovano ?? []),
     },
   });
 }
