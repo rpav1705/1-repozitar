@@ -21,8 +21,12 @@
  * Přípona smí obsahovat jen písmena/číslice hned za "_" (končí na první
  * pomlčce/mezeře/dalším podtržítku), ať nepohltí nesouvisející část kódu
  * za pomlčkou jako "-1R".
+ *
+ * Číslo zařízení může mít i příponu za lomítkem ("REV-E-HILL04/2-1R" ->
+ * "HILL04/2", vedle toho "HILL04/1" je jiné zařízení se svým PÚ) – lomítko
+ * se bere jen s následujícími číslicemi, ať nepohltí nic dalšího.
  */
 export function extractEquipmentNumber(text: string): string | null {
-  const match = text.match(/[A-Z]{2,}\d{2,}(?:_[A-Z0-9]+)?/i);
+  const match = text.match(/[A-Z]{2,}\d{2,}(?:_[A-Z0-9]+|\/\d+)?/i);
   return match ? match[0] : null;
 }
