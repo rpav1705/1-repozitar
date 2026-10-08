@@ -245,8 +245,45 @@ function parseTerminHodnota(raw: string): Date | null {
 const INVENTARNI_CISLO_SPOTREBIC_RE =
   /Inventární\s*číslo:\s*([^\s]+(?:\s(?!\s)(?=[\p{L}\p{N}])[^\s]+)*)/u;
 
+/** Popisky z pravého sloupce hlavičky spotřebiče ("výrobce", "typ" …) – zastaví skládání kódu. */
+const POPISEK_PRAVEHO_SLOUPCE_RE = /^(výrobce|typ|napětí|proud|příkon|skupina|délka|poznámka|rok|výrobní|umístění|kategorie)/i;
+
+/**
+ * U některých PDF (poškozený/rozšířený font) pdf.js rozdělí jeden kód na
+ * krátké kousky oddělené 2+ mezerami ("V  AHA  01" místo "VAHA01"), které
+ * regex výš vezme jen první ("V"). Pokud je dosavadní kousek nejvýš 3 znaky,
+ * připojí se další krátký (nejvýš 4 znaky) alfanumerický kousek – až po popisek
+ * z pravého sloupce. Delší hodnotu ("FOAM05  Z01") nechá beze změny.
+ */
+function slozRozdelenyKod(lines: string[], re: RegExp, hodnota: string | null): string | null {
+  if (!hodnota) return hodnota;
+  for (const line of lines) {
+    const match = line.match(re);
+    if (!match || match.index === undefined) continue;
+    const bunky = line
+      .slice(match.index + match[0].length)
+      .split(/\s{2,}/)
+      .map((b) => b.trim())
+      .filter(Boolean);
+    let vysledek = hodnota;
+    let posledni = hodnota.replace(/\s+/g, "");
+    for (const bunka of bunky) {
+      if (POPISEK_PRAVEHO_SLOUPCE_RE.test(bunka)) break;
+      if (posledni.length > 3 || bunka.length > 4 || !/^[\p{L}\p{N}]+$/u.test(bunka)) break;
+      vysledek += bunka;
+      posledni = bunka;
+    }
+    return vysledek;
+  }
+  return hodnota;
+}
+
 function extractInventarniCisloSpotrebic(lines: string[]): string | null {
-  const hodnota = findValueAfterLabel(lines, INVENTARNI_CISLO_SPOTREBIC_RE);
+  const hodnota = slozRozdelenyKod(
+    lines,
+    INVENTARNI_CISLO_SPOTREBIC_RE,
+    findValueAfterLabel(lines, INVENTARNI_CISLO_SPOTREBIC_RE)
+  );
   // Mezera zachycená uvnitř kódu zařízení (viz regex výš – nastane jen u
   // překlepu typu "ASST 133") se u téhle šablony v "planovane_revize" nikde
   // nevyskytuje (ověřeno ručně na reálných PDF – viz diagnostika
@@ -378,7 +415,11 @@ const INVENTARNI_CISLO_STROJ_RE =
   /Inventární\s*číslo\s*:?\s*(?:\S*:\s*)?([^\s]+(?:\s(?!\s)(?=[\p{L}\p{N}])[^\s]+)*)/u;
 
 function extractInventarniCisloStroj(lines: string[]): string | null {
-  const hodnota = findValueAfterLabel(lines, INVENTARNI_CISLO_STROJ_RE);
+  const hodnota = slozRozdelenyKod(
+    lines,
+    INVENTARNI_CISLO_STROJ_RE,
+    findValueAfterLabel(lines, INVENTARNI_CISLO_STROJ_RE)
+  );
   // Viz komentář u stejného .replace() v extractInventarniCisloSpotrebic výš.
   return vycistiCisloZarizeni(hodnota ? hodnota.replace(/\s+/g, "") : null);
 }
