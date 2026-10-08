@@ -18,7 +18,12 @@
  * jednoznačnou shodou, aniž by appka zprávu znovu zpracovávala).
  */
 
-import { jeDruhRevize, planOdpovidaDruhu } from "./druhRevize";
+import {
+  DRUH_REVIZE_LABELS,
+  frekvenceProDruh,
+  jeDruhRevize,
+  planOdpovidaDruhu,
+} from "./druhRevize";
 
 export type RevizniZpravaRadek = {
   /** ID dokumentu v "revizni_zpravy" – appka ho potřebuje k ručnímu označení "ignorováno". */
@@ -57,6 +62,8 @@ export type DetailViceShod = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  /** Srozumitelný důvod, proč se zpráva nespárovala (zobrazuje se ve sloupci Důvod). */
+  duvod: string;
 };
 
 export type DetailBezShody = {
@@ -65,6 +72,7 @@ export type DetailBezShody = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  duvod: string;
 };
 
 export type DetailChybiCislo = {
@@ -72,6 +80,7 @@ export type DetailChybiCislo = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  duvod: string;
 };
 
 export type DetailIgnorovane = {
@@ -152,6 +161,7 @@ export function analyzujNesparovaneZpravy(
         soubor: z.soubor_nazev,
         stranka: z.stranka,
         pdf_url: z.pdf_url ?? null,
+        duvod: "Z PDF se nepodařilo přečíst číslo zařízení (nečitelný nebo poškozený protokol).",
       });
       continue;
     }
@@ -165,12 +175,23 @@ export function analyzujNesparovaneZpravy(
       : planyZarizeni;
     const seznamPu = odpovidajici.map((p) => p.pu);
     if (seznamPu.length === 0) {
+      let duvod = "Zařízení s tímto číslem není v plánu revizí (nebo je v plánu zapsané jinak).";
+      if (jeDruhRevize(druh) && planyZarizeni.length > 0) {
+        const frekvence = [...new Set(planyZarizeni.map((p) => p.frekvence))]
+          .filter((f): f is number => typeof f === "number")
+          .sort((a, b) => a - b);
+        duvod =
+          `Zařízení je v plánu, ale ne s frekvencí odpovídající druhu revize ze zprávy ` +
+          `(${DRUH_REVIZE_LABELS[druh]} = ${frekvenceProDruh(druh)} r.; v plánu: ` +
+          `${frekvence.length > 0 ? frekvence.join(", ") + " r." : "frekvence neuvedena"}).`;
+      }
       bezShody.push({
         id: z.id,
         cislo_zarizeni: z.cislo_zarizeni,
         soubor: z.soubor_nazev,
         stranka: z.stranka,
         pdf_url: z.pdf_url ?? null,
+        duvod,
       });
     } else if (seznamPu.length > 1) {
       viceShod.push({
@@ -181,6 +202,7 @@ export function analyzujNesparovaneZpravy(
         soubor: z.soubor_nazev,
         stranka: z.stranka,
         pdf_url: z.pdf_url ?? null,
+        duvod: `Číslu zařízení odpovídá v plánu ${seznamPu.length} řádků (PÚ) – nelze určit, který je správný.`,
       });
     }
   }

@@ -2153,6 +2153,7 @@ type AnalyzaDetailViceShod = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  duvod: string;
 };
 
 type AnalyzaDetailBezShody = {
@@ -2161,6 +2162,7 @@ type AnalyzaDetailBezShody = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  duvod: string;
 };
 
 type AnalyzaDetailChybiCislo = {
@@ -2168,6 +2170,7 @@ type AnalyzaDetailChybiCislo = {
   soubor: string;
   stranka: number;
   pdf_url: string | null;
+  duvod: string;
 };
 
 type AnalyzaDetailIgnorovane = {
@@ -2335,6 +2338,7 @@ function AnalyzaTabulkaViceShod({
             <th className="py-1 pr-3 font-semibold">PÚ</th>
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold">Důvod</th>
             <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
@@ -2348,6 +2352,7 @@ function AnalyzaTabulkaViceShod({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-gray-600">{d.duvod}</td>
               <td className="py-1 pr-3 text-right">
                 <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
               </td>
@@ -2379,6 +2384,7 @@ function AnalyzaTabulkaBezShody({
             <th className="py-1 pr-3 font-semibold">Číslo zařízení</th>
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold">Důvod</th>
             <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
@@ -2390,6 +2396,7 @@ function AnalyzaTabulkaBezShody({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-gray-600">{d.duvod}</td>
               <td className="py-1 pr-3 text-right">
                 <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
               </td>
@@ -2420,6 +2427,7 @@ function AnalyzaTabulkaChybiCislo({
           <tr className="border-b border-gray-200 text-gray-500">
             <th className="py-1 pr-3 font-semibold">Soubor zprávy</th>
             <th className="py-1 pr-3 font-semibold">Strana</th>
+            <th className="py-1 pr-3 font-semibold">Důvod</th>
             <th className="py-1 pr-3 font-semibold"></th>
           </tr>
         </thead>
@@ -2430,6 +2438,7 @@ function AnalyzaTabulkaChybiCislo({
                 <OdkazNaSoubor soubor={d.soubor} pdfUrl={d.pdf_url} />
               </td>
               <td className="py-1 pr-3">{d.stranka || "—"}</td>
+              <td className="py-1 pr-3 text-gray-600">{d.duvod}</td>
               <td className="py-1 pr-3 text-right">
                 <TlacitkoIgnorovat id={d.id} probiha={probihaId === d.id} onClick={onIgnorovat} />
               </td>
