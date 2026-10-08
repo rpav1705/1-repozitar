@@ -46,7 +46,13 @@ import { describeSaveError } from "@/lib/friendlyError";
 import { formatLogCas } from "@/lib/formatLogCas";
 import { yieldToMainThread } from "@/lib/yieldToMainThread";
 import { KolekceRevizi } from "@/lib/typRevize";
-import { DRUH_REVIZE_LABELS, DruhRevize, jeDruhRevize, planOdpovidaDruhu } from "@/lib/druhRevize";
+import {
+  DRUH_REVIZE_LABELS,
+  DruhRevize,
+  frekvenceProDruh,
+  jeDruhRevize,
+  planOdpovidaDruhu,
+} from "@/lib/druhRevize";
 import { useTypRevize } from "@/lib/TypRevizeContext";
 
 // Firestore dovoluje max. 500 zápisů v jednom writeBatch – zápis proto
@@ -594,6 +600,8 @@ type ProcessedZprava = {
   /** Druh revize ze zprávy (tlakové nádoby), jinak null – viz lib/druhRevize.ts. */
   druh_revize: DruhRevize | null;
   parovani_stav: ParovaniStav;
+  /** Proč se zpráva nespárovala jednoznačně (jen u "bez_shody" a "vice_shod"). */
+  parovani_duvod: string | null;
   posledni_revize_vcas: boolean | null;
   /**
    * Termín skutečně přečtený zpátky z planovane_revize hned po zápisu
@@ -798,14 +806,29 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             const planovane_revize_ids = kandidati.map((d) => d.id);
 
             let parovani_stav: ParovaniStav;
+            let parovani_duvod: string | null = null;
             let posledni_revize_vcas: boolean | null = null;
 
             if (kandidati.length === 0) {
               parovani_stav = "bez_shody";
+              if (matchSnap.docs.length === 0) {
+                parovani_duvod = `zařízení ${zprava.cislo_zarizeni} není v plánu revizí (nebo je v plánu zapsané jinak)`;
+              } else if (druhZpravy) {
+                const frekvence = [
+                  ...new Set(matchSnap.docs.map((d) => d.data().frekvence).filter((f) => typeof f === "number")),
+                ].sort((a, b) => a - b);
+                parovani_duvod =
+                  `zařízení je v plánu, ale ne s frekvencí odpovídající druhu revize ze zprávy ` +
+                  `(${DRUH_REVIZE_LABELS[druhZpravy]} = ${frekvenceProDruh(druhZpravy)} r.; v plánu: ` +
+                  `${frekvence.length > 0 ? frekvence.join(", ") + " r." : "frekvence neuvedena"})`;
+              }
             } else if (kandidati.length > 1) {
               // Zpráva neurčuje, kterého konkrétního plánu (typu revize) se týká –
               // při víc shodách proto nic automaticky needitujeme, jen upozorníme.
               parovani_stav = "vice_shod";
+              parovani_duvod = `číslu zařízení odpovídá v plánu ${kandidati.length} řádků (PÚ: ${kandidati
+                .map((d) => d.data().pu ?? d.id)
+                .join(", ")}) – nelze určit, který je správný`;
             } else {
               parovani_stav = "shoda";
               const existingTermin = kandidati[0].data().termin;
@@ -854,6 +877,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               druh_revize: druhZpravy,
               parovani_stav,
+              parovani_duvod,
               posledni_revize_vcas,
               // Dopočítá se až po synchronizaci historie níž – tou dobou už
               // je jasné, jestli tahle konkrétní zpráva zůstala tou
@@ -1048,16 +1072,26 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             </div>
 
             {skippedPages.length > 0 && (
-              <details className="text-[12px] text-gray-500">
+              <details open className="text-[12px] text-gray-500">
                 <summary className="cursor-pointer font-semibold">Nerozpoznané stránky/soubory</summary>
-                <ul className="mt-1 list-inside list-disc">
-                  {skippedPages.map((s, i) => (
-                    <li key={i}>
-                      {s.soubor}
-                      {s.stranka > 0 ? `, strana ${s.stranka}` : ""}: {s.duvod}
-                    </li>
-                  ))}
-                </ul>
+                <table className="mt-1 w-full text-left text-[12px]">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-gray-500">
+                      <th className="py-1 pr-3 font-semibold">Soubor</th>
+                      <th className="py-1 pr-3 font-semibold">Strana</th>
+                      <th className="py-1 pr-3 font-semibold">Důvod</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {skippedPages.map((s, i) => (
+                      <tr key={i} className="border-b border-gray-100">
+                        <td className="py-1 pr-3">{s.soubor}</td>
+                        <td className="py-1 pr-3">{s.stranka > 0 ? s.stranka : "celý soubor"}</td>
+                        <td className="py-1 pr-3 text-gray-600">{s.duvod}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </details>
             )}
 
@@ -1096,6 +1130,11 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                         <td className="py-1.5 pr-4">{p.technik_cislo_opravneni || "—"}</td>
                         <td className={`py-1.5 pr-4 font-semibold ${PAROVANI_LABELS[p.parovani_stav].className}`}>
                           {PAROVANI_LABELS[p.parovani_stav].label}
+                          {p.parovani_duvod && (
+                            <span className="block text-[11px] font-normal text-gray-500">
+                              {p.parovani_duvod}
+                            </span>
+                          )}
                         </td>
                         <td className={`py-1.5 pr-4 ${terminSedi ? "" : "font-semibold text-status-overdue"}`}>
                           {p.parovani_stav !== "shoda"
