@@ -655,14 +655,27 @@ function extractNazevRozvadeceZarizeni(lines: string[]): string | null {
   // za zkratkou) – tečka před dvojtečkou je proto nepovinná.
   const popisek = new RegExp(fuzzy("název rozv") + "\\.?\\s*:\\s*(.*)", "i");
   let raw: string | null = null;
-  for (const line of lines) {
-    const match = line.match(popisek);
+  let radekPopisku = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(popisek);
     if (match) {
       raw = match[1];
+      radekPopisku = i;
       break;
     }
   }
-  if (!raw) return null;
+  if (raw === null) return null;
+  if (!raw.trim()) {
+    // Hodnota u některých protokolů (např. rozvaděče RSUBRACK*, RNAB) není na
+    // řádku s popiskem, ale o řádek či dva níž jako samostatný text bez ":"
+    // ("název rozv.:" / "typ: plast …  v.č.: --" / "RSUBRACK1"). Hledá se jen
+    // v nejbližších třech řádcích a jen jediný token bez mezer a dvojtečky.
+    for (const dalsi of lines.slice(radekPopisku + 1, radekPopisku + 4)) {
+      const token = dalsi.trim();
+      if (/^[\p{L}\p{N}_\-./]+$/u.test(token)) return vycistiCisloZarizeni(token);
+    }
+    return null;
+  }
   // Fuzzy (ne jen /typ\s*:/i) – stejná "roztržená" mezera uvnitř popisku
   // (viz komentář u šablony C výš) umí postihnout i tuhle zarážku samotnou
   // ("t y p:" apod.), a doslovný regex by ji pak nenašel vůbec – appka by
@@ -715,7 +728,17 @@ function extractDatumProvedeniZarizeni(lines: string[]): Date | null {
 /** Viz komentář u extractDatumProvedeniZarizeni výš – stejný důvod odstranění mezer před parsováním. */
 function extractTerminZarizeni(lines: string[]): Date | null {
   const raw = findFuzzyValueAfterLabel(lines, "Doporučený termín další revize:");
-  return raw ? parseTerminHodnota(raw.replace(/\s+/g, "")) : null;
+  return raw ? parseTerminHodnota(odstranPredponuDo(raw).replace(/\s+/g, "")) : null;
+}
+
+/**
+ * Termín bývá zapsaný i jako "do 09/2027" ("Doporučený termín další revize: do
+ * 09/2027 dle vnitřního předpisu …") – předpona "do" (příp. "nejpozději do")
+ * se před číslem odstraní, jinak by parseMesicRok (kotvený na začátek) termín
+ * nerozpoznal. Bere se jen když hned za ní následuje číslice.
+ */
+function odstranPredponuDo(raw: string): string {
+  return raw.replace(/^\s*(?:n\s*e\s*j\s*p\s*o\s*z\s*d\s*ě\s*j\s*i\s*)?d\s*o\s*(?=\d)/i, "");
 }
 
 /**
@@ -899,7 +922,7 @@ function extractDatumProvedeniObjekt(lines: string[]): Date | null {
 /** "Doporučený termín další revize: 08/2027 dle vnitřního předpisu provozovatele." */
 function extractTerminObjekt(lines: string[]): Date | null {
   const raw = findFuzzyValueAfterLabel(lines, "Doporučený termín další revize:");
-  return raw ? parseTerminHodnota(raw.replace(/\s+/g, "")) : null;
+  return raw ? parseTerminHodnota(odstranPredponuDo(raw).replace(/\s+/g, "")) : null;
 }
 
 /**
