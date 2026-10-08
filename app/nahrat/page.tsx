@@ -1699,14 +1699,73 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               poznamka: "stránka se po přeparsování nepodařila znovu rozpoznat",
             });
           } else if (fresh.cislo_zarizeni !== cisloPuvodni) {
-            reportDoc({
-              id: docSnap.id,
-              soubor,
-              stranka,
-              cislo_zarizeni: cisloPuvodni,
-              stav: "chyba",
-              poznamka: `číslo zařízení se po přeparsování změnilo (${cisloPuvodni} → ${fresh.cislo_zarizeni}) – přeskočeno`,
-            });
+            // Číslo zařízení se po opravě parseru změnilo (typicky dřív špatně
+            // přečtené, např. "V" místo "VAHA01"). ID dokumentu se odvozuje z
+            // čísla, proto se zpráva přepíše pod NOVÉ ID a starý (chybný)
+            // záznam se smaže – bez toho by zůstal navždy "nezpracovaný" a
+            // appka by ho při každém běhu znovu nabízela. PDF ve Storage zůstává.
+            try {
+              if (!fresh.cislo_zarizeni) throw new Error("po přeparsování se číslo zařízení nepodařilo přečíst");
+              const noveId = revizniZpravaDocId(fresh.cislo_zarizeni, fresh.datum_provedeni, fresh.druh_revize);
+              if (!noveId) throw new Error("z nového čísla zařízení nejde vytvořit ID záznamu");
+
+              const planSnap = await getDocs(
+                query(collection(db, kolekce.plan), where("cislo_zarizeni", "==", fresh.cislo_zarizeni))
+              );
+              const druhFresh = fresh.druh_revize ?? null;
+              const kandidati = druhFresh
+                ? planSnap.docs.filter((d) => planOdpovidaDruhu(d.data().frekvence, druhFresh))
+                : planSnap.docs;
+              const parovaniStav: ParovaniStav =
+                kandidati.length === 0 ? "bez_shody" : kandidati.length > 1 ? "vice_shod" : "shoda";
+
+              const novaData = {
+                ...data,
+                ...revizniZpravaToFirestoreFields(fresh),
+                planovane_revize_ids: kandidati.map((d) => d.id),
+                parovani_stav: parovaniStav,
+                [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()),
+              };
+              if (noveId === docSnap.id) {
+                await updateDoc(docSnap.ref, novaData);
+              } else {
+                const batch = writeBatch(db);
+                batch.set(doc(db, kolekce.zpravy, noveId), novaData);
+                batch.delete(docSnap.ref);
+                await batch.commit();
+              }
+
+              hotoveIdsRunning.add(docSnap.id);
+              hotoveIdsRunning.add(noveId);
+              ulozitReprocessCheckpoint(
+                {
+                  mod,
+                  hotoveIds: Array.from(hotoveIdsRunning),
+                  aktualizovano: new Date().toISOString(),
+                },
+                kolekce
+              );
+              reportDoc({
+                id: noveId,
+                soubor,
+                stranka,
+                cislo_zarizeni: fresh.cislo_zarizeni,
+                stav: "aktualizovano",
+                poznamka: `číslo zařízení opraveno (${cisloPuvodni} → ${fresh.cislo_zarizeni})`,
+                vysledekRevize: fresh.vysledek_revize,
+              });
+            } catch (err) {
+              reportDoc({
+                id: docSnap.id,
+                soubor,
+                stranka,
+                cislo_zarizeni: cisloPuvodni,
+                stav: "chyba",
+                poznamka: `číslo zařízení se po přeparsování změnilo (${cisloPuvodni} → ${fresh.cislo_zarizeni || "nenalezeno"}), ale záznam se nepodařilo přepsat: ${
+                  err instanceof Error ? err.message : "neznámá chyba"
+                }`,
+              });
+            }
           } else {
             try {
               // Zpráva, která pořád odkazuje na celý velký soubor, dostane
