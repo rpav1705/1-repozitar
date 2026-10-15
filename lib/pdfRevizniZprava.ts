@@ -66,6 +66,11 @@ export type ParsedRevizniZprava = {
    * lib/revizniZpravyHistorie.ts), pokud ten nemá vlastní revizní zprávu.
    */
   dalsi_terminy?: DalsiTermin[];
+  /**
+   * Zprávu nerozpoznal vlastní parser, přečetl ji Claude (dočasná integrace,
+   * viz lib/claudeCteniZprav.ts) – uloží se s příznakem k pozdější kontrole.
+   */
+  cteno_claude?: boolean;
 };
 
 /**
@@ -74,7 +79,7 @@ export type ParsedRevizniZprava = {
  * jinak by "nevyhovuje" jako podřetězec obsahující "vyhovuje" vyšlo jako OK).
  * Cokoli jiného (jiná formulace, nebo prázdné/nenalezené pole) → KE_KONTROLE.
  */
-function klasifikujVysledekRevize(celkoveHodnoceni: string): VysledekRevize {
+export function klasifikujVysledekRevize(celkoveHodnoceni: string): VysledekRevize {
   const text = celkoveHodnoceni.trim().toLowerCase();
   if (text === "vyhovuje") return "OK";
   if (text.includes("nevyhovuje")) return "NOK";

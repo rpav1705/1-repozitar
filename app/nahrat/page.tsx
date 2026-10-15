@@ -25,6 +25,7 @@ import { deleteObject, getBytes, getDownloadURL, ref, uploadBytes } from "fireba
 import { otevriZdrojPdf, ZdrojPdf } from "@/lib/pdfRozdeleni";
 import { parsePlanWorkbook, ParsedPlanRow, ParseSkip } from "@/lib/xlsxImport";
 import { parseRevizniZpravyPdf, ParsedRevizniZprava, VysledekRevize } from "@/lib/pdfRevizniZprava";
+import { precistPreskocenePomociClaude } from "@/lib/claudeCteniZprav";
 import {
   REPROCESS_MARKER_FIELD,
   revizniZpravaDocId,
@@ -600,6 +601,8 @@ type ProcessedZprava = {
   /** Druh revize ze zprávy (tlakové nádoby), jinak null – viz lib/druhRevize.ts. */
   druh_revize: DruhRevize | null;
   parovani_stav: ParovaniStav;
+  /** Přečetl Claude, ne vlastní parser (dočasná integrace, viz lib/claudeCteniZprav.ts). */
+  ctenoClaude: boolean;
   /** Proč se zpráva nespárovala jednoznačně (jen u "bez_shody" a "vice_shod"). */
   parovani_duvod: string | null;
   posledni_revize_vcas: boolean | null;
@@ -729,6 +732,8 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
   const [fileSummary, setFileSummary] = useState({ total: 0, ok: 0, failed: 0 });
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [zamekError, setZamekError] = useState("");
+  // DOČASNÁ integrace Claude (viz lib/claudeCteniZprav.ts) – výchozí vypnuto.
+  const [pouzitClaude, setPouzitClaude] = useState(false);
 
   const handleProcess = async () => {
     if (files.length === 0) return;
@@ -770,12 +775,32 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
     // + dosazení skutečně nejnovější zprávy do plánu), viz komentář u
     // synchronizujHistoriiZarizeni.
     const dotcenaZarizeni = new Set<string>();
+    // Chybí-li na serveru ANTHROPIC_API_KEY, další soubory už Claude nezkouší.
+    let claudeNedostupny = false;
 
     try {
     for (const file of files) {
       try {
         const buffer = await file.arrayBuffer();
-        const { zpravy, preskoceno } = await parseRevizniZpravyPdf(buffer, { ocr: kolekce.ocr });
+        const { zpravy, preskoceno: preskocenoParserem } = await parseRevizniZpravyPdf(buffer, {
+          ocr: kolekce.ocr,
+        });
+        let preskoceno = preskocenoParserem;
+
+        // Dočasná integrace Claude: stránky, které parser nerozpoznal, zkusí
+        // přečíst Claude a úspěšně přečtené přidá mezi normální zprávy.
+        if (pouzitClaude && preskoceno.length > 0 && !claudeNedostupny) {
+          const vysledek = await precistPreskocenePomociClaude(
+            buffer,
+            preskoceno,
+            zpravy,
+            kolekce.typ,
+            user ? await user.getIdToken() : ""
+          );
+          zpravy.push(...vysledek.prectene);
+          preskoceno = vysledek.zbyva;
+          if (vysledek.chybaKonfigurace) claudeNedostupny = true;
+        }
 
         for (const p of preskoceno) {
           allSkipped.push({ soubor: file.name, stranka: p.stranka, duvod: p.duvod });
@@ -877,6 +902,7 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
               technik_cislo_opravneni: zprava.technik_cislo_opravneni,
               druh_revize: druhZpravy,
               parovani_stav,
+              ctenoClaude: zprava.cteno_claude === true,
               parovani_duvod,
               posledni_revize_vcas,
               // Dopočítá se až po synchronizaci historie níž – tou dobou už
@@ -1042,6 +1068,21 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
           </button>
         </div>
 
+        <label className="flex items-start gap-2 text-[12.5px] text-gray-600">
+          <input
+            type="checkbox"
+            checked={pouzitClaude}
+            onChange={(e) => setPouzitClaude(e.target.checked)}
+            disabled={status === "processing" || status === "finalizing"}
+            className="mt-0.5"
+          />
+          <span>
+            Stránky, které appka nerozpozná, zkusit přečíst pomocí <strong>Claude</strong> (dočasná
+            funkce). Obsah těchto stránek se odešle službě Anthropic a volání je placené. Přečtené
+            zprávy se uloží s příznakem „přečteno Claude“ – zkontroluj je v tabulce níž.
+          </span>
+        </label>
+
         {zamekError && (
           <p className="rounded-md bg-red-50 px-3 py-2 text-[12.5px] text-red-600">{zamekError}</p>
         )}
@@ -1128,7 +1169,14 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
                           p.overenyTerminVPlanu.getTime() === p.novy_termin.getTime());
                       return (
                       <tr key={i} className="border-b border-gray-100">
-                        <td className="py-1.5 pr-4">{p.cislo_zarizeni}</td>
+                        <td className="py-1.5 pr-4">
+                          {p.cislo_zarizeni}
+                          {p.ctenoClaude && (
+                            <span className="block text-[11px] font-semibold text-purple-700">
+                              přečteno Claude – zkontroluj
+                            </span>
+                          )}
+                        </td>
                         <td className="py-1.5 pr-4">
                           {p.druh_revize ? DRUH_REVIZE_LABELS[p.druh_revize] : "—"}
                         </td>
