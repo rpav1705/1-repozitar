@@ -115,7 +115,11 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 1500,
+        // Čtení údajů z formuláře nepotřebuje dlouhé přemýšlení – nízká
+        // "effort" šetří výstupní tokeny (myšlení se účtuje jako výstup).
+        // max_tokens zahrnuje i myšlení, proto s rezervou nad samotným JSON.
+        max_tokens: 4000,
+        output_config: { effort: "low" },
         messages: [
           {
             role: "user",
@@ -147,7 +151,12 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const api = JSON.parse(apiText) as { content?: { type: string; text?: string }[] };
+    const api = JSON.parse(apiText) as {
+      content?: { type: string; text?: string }[];
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    // Spotřeba jednoho volání do Vercel Logs – podle ní jde spočítat skutečná cena.
+    console.log("Claude čtení zprávy: tokeny", api.usage?.input_tokens, "vstup /", api.usage?.output_tokens, "výstup");
     const text = (api.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
     const data = vyjmoutJson(text) as Record<string, unknown>;
 
