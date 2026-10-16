@@ -465,12 +465,21 @@ function extractDatumProvedeniStroj(lines: string[]): Date | null {
   }
 
   const raw = findValueAfterLabel(lines, /\bDatum:\s*(\d{1,2}\.\d{1,2}\.\d{4})/);
-  return raw ? parseFlexibleDate(raw) : null;
+  if (raw) return parseFlexibleDate(raw);
+
+  // Varianta F (viz extractStrojZprava): "Datum ukončení revize : 10.02.2025".
+  const ukonceni =
+    findValueAfterLabel(lines, /Datum\s+ukončení\s+revize\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})/i) ??
+    findValueAfterLabel(lines, /Datum\s+zahájení\s+revize\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})/i);
+  return ukonceni ? parseFlexibleDate(ukonceni) : null;
 }
 
 function extractTerminStroj(lines: string[]): Date | null {
-  const raw = findValueAfterLabel(lines, /Stanovení termínu další revize:\s*(.+)/);
-  return raw ? parseTerminHodnota(raw) : null;
+  const raw =
+    findValueAfterLabel(lines, /Stanovení termínu další revize:\s*(.+)/) ??
+    // Varianta F: "Doporučený termín další revize : Únor 2027".
+    findValueAfterLabel(lines, /Doporučený\s+termín\s+další\s+revize\s*:\s*(.+)/i);
+  return raw ? parseTerminHodnota(odstranPredponuDo(raw).trim()) : null;
 }
 
 /**
@@ -480,11 +489,20 @@ function extractTerminStroj(lines: string[]): Date | null {
  * 2+ mezerami (další sloupec / popisek), nebo koncem řádku.
  */
 function extractTechnikJmenoStroj(lines: string[]): string | null {
-  return findValueAfterLabel(lines, /-\s*jméno:\s*([^\s]+(?:\s[^\s]+)*?)(?:\s{2,}|$)/);
+  return (
+    findValueAfterLabel(lines, /-\s*jméno:\s*([^\s]+(?:\s[^\s]+)*?)(?:\s{2,}|$)/) ??
+    // Varianta F: "… Revizní technik :" / "Datum zahájení revize : …  Jméno :  Přemysl Vala"
+    // ("Jméno a podpis :" dole u převzetí se nechytí – za "Jméno" musí hned následovat ":").
+    findValueAfterLabel(lines, /(?:^|\s)Jméno\s*:\s*([^\s]+(?:\s[^\s]+)*?)(?:\s{2,}|$)/)
+  );
 }
 
 function extractCisloOpravneniStroj(lines: string[]): string | null {
-  return findValueAfterLabel(lines, /-\s*ev\.\s*číslo:\s*(.+)/);
+  return (
+    findValueAfterLabel(lines, /-\s*ev\.\s*číslo:\s*(.+)/) ??
+    // Varianta F: "Datum ukončení revize : 10.02.2025  Ev. číslo : 489/23/R-EZ-E2A".
+    findValueAfterLabel(lines, /Ev\.\s*číslo\s*:\s*(.+)/)
+  );
 }
 
 /**
@@ -493,9 +511,9 @@ function extractCisloOpravneniStroj(lines: string[]): string | null {
  * (typicky první věta), ať se do UI needitujeme vměstnávat celý odstavec.
  */
 function extractPosudekStroj(lines: string[]): string {
-  const idx = lines.findIndex((l) => /Celkový posudek:/.test(l));
+  const idx = lines.findIndex((l) => /Celkový posudek\s*:/.test(l));
   if (idx === -1) return "";
-  return lines[idx].split(/Celkový posudek:/)[1]?.trim() ?? "";
+  return lines[idx].split(/Celkový posudek\s*:/)[1]?.trim() ?? "";
 }
 
 /**
@@ -551,8 +569,48 @@ function extractVysledekKontrolStroj(
   return { vysledek_revize: "OK", zjistena_zavada: null };
 }
 
+/**
+ * Varianta F šablony B (stejný nadpis "ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ
+ * PRACOVNÍHO STROJE", jiný formulář – popisky s mezerou před dvojtečkou,
+ * "Zpráva ev.č. 2026_025_02", jedna strana, ověřeno na PERS01): sekce
+ * "Kontroly (ČSN EN 60204-1 …)" bez "B." a závady jako jeden řádek
+ * "Zjištěné závady :  Bez závad" (bez tabulky). Výsledek: NOK, pokud některá
+ * kontrola "nevyhovuje" nebo jsou závady vyplněné jinak než "Bez závad".
+ */
+function extractVysledekKontrolStrojF(
+  lines: string[]
+): { vysledek_revize: VysledekRevize; zjistena_zavada: string | null } | null {
+  const zIdx = lines.findIndex((l) => /Zjištěné\s+závady\s*:/i.test(l));
+  if (zIdx === -1) return null;
+
+  const kIdx = lines.findIndex((l) => /^Kontroly\b/.test(l.trim()));
+  const kontrolyRadky = kIdx !== -1 && kIdx < zIdx ? lines.slice(kIdx + 1, zIdx) : [];
+  const nejakaNevyhovuje = kontrolyRadky.some((l) => /nevyhovuje/i.test(l));
+
+  const terminIdx = lines.findIndex(
+    (l, i) => i > zIdx && /Doporučený\s+termín\s+další\s+revize/i.test(l)
+  );
+  const zavadaText = [
+    lines[zIdx].split(/Zjištěné\s+závady\s*:/i)[1] ?? "",
+    ...lines.slice(zIdx + 1, terminIdx === -1 ? zIdx + 1 : terminIdx),
+  ]
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const bezZavad = zavadaText === "" || /^(bez\s+závad|žádné(\s+závady)?|-+)\.?$/i.test(zavadaText);
+
+  if (nejakaNevyhovuje || !bezZavad) {
+    return {
+      vysledek_revize: "NOK",
+      zjistena_zavada: bezZavad ? "dílčí kontrola v sekci \"Kontroly\" je nevyhovující" : zavadaText,
+    };
+  }
+  return { vysledek_revize: "OK", zjistena_zavada: null };
+}
+
 function extractStrojZprava(lines: string[]) {
-  const kontroly = extractVysledekKontrolStroj(lines);
+  const kontroly = extractVysledekKontrolStroj(lines) ?? extractVysledekKontrolStrojF(lines);
   return {
     cislo_zarizeni: extractInventarniCisloStroj(lines),
     datum_provedeni: extractDatumProvedeniStroj(lines),
