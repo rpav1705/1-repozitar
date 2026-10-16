@@ -1525,8 +1525,11 @@ type Sablona =
  */
 function detectSablona(lines: string[]): Sablona | null {
   const text = lines.join("\n");
-  if (/revizi elektrického zařízení pracovního stroje/.test(text)) return "pracovni_stroj";
-  if (/revizi elektrického spotřebiče/.test(text)) return "spotrebic";
+  // Case-insensitive – novější formulář pracovního stroje má nadpis celý velkými
+  // písmeny ("ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ PRACOVNÍHO STROJE"), jinak by
+  // spadl pod šablonu C (stejný začátek nadpisu).
+  if (/revizi\s+elektrického\s+zařízení\s+pracovního\s+stroje/i.test(text)) return "pracovni_stroj";
+  if (/revizi\s+elektrického\s+spotřebiče/i.test(text)) return "spotrebic";
   if (jeTitulniStrankaTlakoveNadoby(text)) return "tlakova_nadoba";
   if (new RegExp(fuzzy("Revidovaný objekt:"), "i").test(text)) {
     return "elektricke_zarizeni_objekt";
