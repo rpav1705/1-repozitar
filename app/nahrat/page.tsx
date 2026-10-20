@@ -2948,6 +2948,137 @@ function NesparovaneZpravySection() {
   );
 }
 
+type PrehledTyp = {
+  typ: string;
+  label: string;
+  celkem: number;
+  prirazeno: number;
+  bezShody: number;
+  viceShod: number;
+  ignorovano: number;
+  chybiCislo: number;
+  ctenoClaude: number;
+  souboru: number;
+  vysledky: { OK: number; NOK: number; KE_KONTROLE: number; nezname: number };
+  podleDne: { den: string; pocet: number }[];
+  technici: { jmeno: string; pocet: number }[];
+  celkemVDatabazi: number;
+};
+
+/**
+ * Přehled revizních zpráv nahraných v zvoleném měsíci (oba druhy revizí) –
+ * kolik jich je přiřazeno na plán, rozpad podle výsledku, dnů a techniků.
+ * Počítá server (app/api/prehled-zprav/route.ts), na vyžádání kliknutím.
+ */
+function PrehledMesiceSection() {
+  const { user } = useAuth();
+  const dnes = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Prague" });
+  const [mesic, setMesic] = useState(dnes.slice(0, 7));
+  const [stav, setStav] = useState<"idle" | "nacitam" | "hotovo" | "chyba">("idle");
+  const [typy, setTypy] = useState<PrehledTyp[]>([]);
+  const [chyba, setChyba] = useState("");
+
+  const nacist = async () => {
+    setStav("nacitam");
+    setChyba("");
+    try {
+      if (!user) throw new Error("Nejsi přihlášen/a – obnov prosím stránku a přihlas se znovu.");
+      const token = await user.getIdToken();
+      const res = await fetch(`/api/prehled-zprav?mesic=${encodeURIComponent(mesic)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json) {
+        throw new Error(json && typeof json.error === "string" ? json.error : `Přehled se nepodařilo načíst (HTTP ${res.status}).`);
+      }
+      setTypy(json.typy as PrehledTyp[]);
+      setStav("hotovo");
+    } catch (err) {
+      setChyba(err instanceof Error ? err.message : "Přehled se nepodařilo načíst.");
+      setStav("chyba");
+    }
+  };
+
+  return (
+    <div className="overflow-hidden rounded-lg bg-white shadow-sm">
+      <div className="bg-navy px-[18px] py-2.5 text-[13px] font-bold text-white">
+        Přehled nahraných revizních zpráv za měsíc
+      </div>
+      <div className="flex flex-col gap-4 px-[18px] py-5">
+        <p className="text-[12.5px] text-gray-500">
+          Spočítá zprávy nahrané v zvoleném měsíci (podle data nahrání) a kolik z nich je aktuálně
+          přiřazeno na přesně jeden záznam plánu. Appka drží u každého zařízení jen poslední 2
+          zprávy, takže zpráva nahraná v měsíci a mezitím nahrazená novější v přehledu chybí.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="month"
+            value={mesic}
+            onChange={(e) => setMesic(e.target.value)}
+            className="rounded-md border border-gray-300 px-2 py-1.5 text-[13px]"
+          />
+          <button
+            onClick={nacist}
+            disabled={stav === "nacitam" || !mesic}
+            className="rounded-md bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {stav === "nacitam" ? "Počítám…" : "Zobrazit přehled"}
+          </button>
+        </div>
+        {stav === "chyba" && (
+          <p className="rounded-md bg-red-50 px-3 py-2 text-[12.5px] text-red-600">{chyba}</p>
+        )}
+        {stav === "hotovo" &&
+          typy.map((t) => (
+            <div key={t.typ} className="rounded-md border border-gray-100 bg-gray-50 px-3 py-3 text-[12.5px]">
+              <div className="text-[13px] font-bold text-navy">
+                {t.label} – {mesic}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
+                <div>Nahráno zpráv: <strong>{t.celkem}</strong></div>
+                <div>Přiřazeno na plán: <strong className="text-status-ok">{t.prirazeno}</strong></div>
+                <div>Bez shody v plánu: <strong>{t.bezShody}</strong></div>
+                <div>Více shod: <strong>{t.viceShod}</strong></div>
+                <div>Ignorováno: <strong>{t.ignorovano}</strong></div>
+                <div>Bez čísla zařízení: <strong>{t.chybiCislo}</strong></div>
+                <div>Souborů: <strong>{t.souboru}</strong></div>
+                <div>Přečteno Claude: <strong>{t.ctenoClaude}</strong></div>
+                <div>OK: <strong>{t.vysledky.OK}</strong></div>
+                <div>NOK: <strong>{t.vysledky.NOK}</strong></div>
+                <div>Ke kontrole: <strong>{t.vysledky.KE_KONTROLE}</strong></div>
+                <div className="text-gray-500">Celkem v databázi: {t.celkemVDatabazi}</div>
+              </div>
+              {t.celkem > 0 && (
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <div className="font-semibold text-gray-500">Po dnech</div>
+                    <ul className="mt-1">
+                      {t.podleDne.map((d) => (
+                        <li key={d.den}>
+                          {d.den}: <strong>{d.pocet}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-gray-500">Podle technika</div>
+                    <ul className="mt-1">
+                      {t.technici.map((x) => (
+                        <li key={x.jmeno}>
+                          {x.jmeno}: <strong>{x.pocet}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 export default function NahratPage() {
   const { typ } = useTypRevize();
   // key = druh revizí – při přepnutí se celá stránka přemountuje, ať se
@@ -2983,6 +3114,7 @@ function NahratStranka() {
             <RevizniZpravyUpload onUlozeno={() => setRevizniZpravyReloadKey((k) => k + 1)} />
             <RevizniZpravyReprocess reloadKey={revizniZpravyReloadKey} />
             <NesparovaneZpravySection />
+            <PrehledMesiceSection />
           </div>
         </div>
       )}
