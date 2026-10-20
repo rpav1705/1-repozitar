@@ -995,11 +995,22 @@ function extractTerminObjekt(lines: string[]): Date | null {
  * konce celého řádku.
  */
 function extractTechnikJmenoObjekt(lines: string[]): string | null {
-  const raw = findFuzzyValueAfterLabel(lines, "Revizní technik:");
-  if (!raw) return null;
+  const idx = lines.findIndex((l) => new RegExp(fuzzy("Revizní technik:"), "i").test(l));
+  if (idx === -1) return null;
+  const raw = lines[idx].match(new RegExp(fuzzy("Revizní technik:") + "(.*)", "i"))?.[1] ?? "";
   const dalsiPopisekIdx = raw.search(/revize\s*:/i);
   const jmeno = (dalsiPopisekIdx === -1 ? raw : raw.slice(0, dalsiPopisekIdx)).trim();
-  return jmeno || null;
+  // U části zpráv jsou popisky "Revizní technik:  Revidovaný objekt:" vedle
+  // sebe na jednom řádku a jména (levý sloupec) až na řádku pod nimi
+  // ("David Kadlec  Yanfeng Czechia Automotive") – do jména se pak dřív
+  // dostal popisek "Revidovaný objekt:". Prázdná hodnota nebo druhý popisek
+  // znamená, že jméno je první sloupec následujícího řádku.
+  if (jmeno && !/^revidovan/i.test(jmeno.replace(/\s+/g, ""))) return jmeno;
+  const dalsi = lines.slice(idx + 1, idx + 3).find((l) => l.trim());
+  const prvniSloupec = dalsi?.split(/\s{2,}/)[0]?.trim();
+  return prvniSloupec && /^\p{Lu}[\p{L}.'-]*(?:\s+\p{Lu}[\p{L}.'-]*){1,3}$/u.test(prvniSloupec)
+    ? prvniSloupec
+    : null;
 }
 
 /** "osv.č.: 2578/24/R-EZ-E1A,E1B" – evidenční číslo oprávnění technika. */
