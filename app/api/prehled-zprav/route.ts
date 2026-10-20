@@ -109,7 +109,9 @@ export async function GET(request: NextRequest) {
         if (data.cteno_claude === true) ctenoClaude += 1;
 
         const vysledek = data.vysledek_revize;
-        if (vysledek === "OK" || vysledek === "NOK" || vysledek === "KE_KONTROLE") vysledky[vysledek] += 1;
+        if (vysledek === "OK") vysledky.OK += 1;
+        else if (vysledek === "NOK") vysledky.NOK += 1;
+        else if (vysledek === "KE_KONTROLE") vysledky.KE_KONTROLE += 1;
         else vysledky.nezname += 1;
 
         const technik = typeof data.technik_jmeno === "string" && data.technik_jmeno ? data.technik_jmeno : "(neznámý)";
