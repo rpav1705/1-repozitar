@@ -1737,6 +1737,39 @@ function RevizniZpravyReprocess({ reloadKey }: { reloadKey: number }) {
               stav: "chyba",
               poznamka: downloadError,
             });
+          } else if (!fresh && data.cteno_claude === true) {
+            // Zprávu přečetlo AI (sken bez textu, vlastní parser ji nikdy
+            // nerozpozná) – ponechá se beze změny, jen se označí jako
+            // zpracovaná, ať ji appka pořád nenabízí jako "nezpracovanou".
+            try {
+              await updateDoc(docSnap.ref, { [REPROCESS_MARKER_FIELD]: Timestamp.fromDate(new Date()) });
+              hotoveIdsRunning.add(docSnap.id);
+              ulozitReprocessCheckpoint(
+                { mod, hotoveIds: Array.from(hotoveIdsRunning), aktualizovano: new Date().toISOString() },
+                kolekce
+              );
+              reportDoc({
+                id: docSnap.id,
+                soubor,
+                stranka,
+                cislo_zarizeni: cisloPuvodni,
+                stav: "aktualizovano",
+                poznamka: "přečteno AI – ponecháno beze změny (vlastní parser sken nečte)",
+                vysledekRevize:
+                  data.vysledek_revize === "OK" || data.vysledek_revize === "NOK" || data.vysledek_revize === "KE_KONTROLE"
+                    ? data.vysledek_revize
+                    : undefined,
+              });
+            } catch (err) {
+              reportDoc({
+                id: docSnap.id,
+                soubor,
+                stranka,
+                cislo_zarizeni: cisloPuvodni,
+                stav: "chyba",
+                poznamka: `zprávu přečtenou AI se nepodařilo označit: ${err instanceof Error ? err.message : "neznámá chyba"}`,
+              });
+            }
           } else if (!fresh) {
             reportDoc({
               id: docSnap.id,
