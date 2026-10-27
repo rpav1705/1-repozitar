@@ -1077,8 +1077,8 @@ function RevizniZpravyUpload({ onUlozeno }: { onUlozeno: () => void }) {
             className="mt-0.5"
           />
           <span>
-            Stránky, které appka nerozpozná, zkusit přečíst pomocí <strong>Claude</strong> (dočasná
-            funkce). Obsah těchto stránek se odešle službě Anthropic a volání je placené. Přečtené
+            Stránky, které appka nerozpozná, zkusit přečíst pomocí <strong>AI (Google Gemini)</strong> (dočasná
+            funkce). Obsah těchto stránek se odešle službě Google Cloud a volání je placené. Přečtené
             zprávy se uloží s příznakem „přečteno Claude“ – zkontroluj je v tabulce níž.
           </span>
         </label>

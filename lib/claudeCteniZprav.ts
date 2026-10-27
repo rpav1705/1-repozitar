@@ -8,8 +8,10 @@
  * app/nahrat/page.tsx (a pole "cteno_claude" v lib/revizniZpravyFirestore.ts).
  */
 
+import type { Part } from "firebase/ai";
 import { klasifikujVysledekRevize, ParsedRevizniZprava, SkippedPage } from "./pdfRevizniZprava";
 import { otevriZdrojPdf, ZdrojPdf } from "./pdfRozdeleni";
+import { pridatTyp, vyhodnotitOdpoved } from "./cteniZpravPrompt";
 
 /** Odpověď route po validaci na serveru (data jsou YYYY-MM-DD). */
 export type ClaudeCteniVysledek =
@@ -38,14 +40,30 @@ export function bytesNaBase64(bytes: Uint8Array): string {
   return btoa(binarni);
 }
 
-/** Vercel Functions přijímají tělo maximálně 4,5 MB – base64 zvětší data o třetinu. */
-export const CLAUDE_MAX_BYTES_PDF = 3_000_000;
+/**
+ * Gemini přijímá inline data do ~20 MB celého požadavku (base64 zvětší data o
+ * třetinu) – volá se přímo z prohlížeče přes Firebase AI Logic, takže tu
+ * neplatí 4,5MB limit Vercel Functions.
+ */
+export const CLAUDE_MAX_BYTES_PDF = 14_000_000;
 
-/** Maximum stránek jedné zprávy, které appka Claude pošle (ochrana před cenou i limitem těla požadavku). */
+/** Maximum stránek jedné zprávy, které appka modelu pošle (ochrana před cenou). */
 export const CLAUDE_MAX_STRAN = 20;
 
+/** Stejný seznam modelů jako v appce Nákupní požadavky (nakup.html) – neexistující model se přeskočí. */
+const AI_MODELY = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"];
+
+/** Chyby, které znamenají špatné nastavení projektu (ne problém konkrétní zprávy). */
+const CHYBA_KONFIGURACE_RE =
+  /permission|403|billing|not enabled|has not been used|disabled|app.?check|api.?key|quota|blaze/i;
+
+/**
+ * Přečte zprávu (výřez PDF) pomocí Gemini přes Firebase AI Logic s Vertex AI
+ * backendem (účtuje se přes Google Cloud/Blaze projektu, žádný API klíč).
+ * Vyžaduje zapnuté Firebase AI Logic (Vertex AI) v projektu.
+ */
 export async function precistZpravuPomociClaude(
-  idToken: string,
+  _idToken: string,
   pdfBytes: Uint8Array,
   typ: string
 ): Promise<ClaudeCteniVysledek> {
@@ -55,21 +73,44 @@ export async function precistZpravuPomociClaude(
       duvod: `výřez je příliš velký pro odeslání (${(pdfBytes.length / 1e6).toFixed(1)} MB, limit ${CLAUDE_MAX_BYTES_PDF / 1e6} MB)`,
     };
   }
-  let res: Response;
   try {
-    res = await fetch("/api/claude-cteni-zpravy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-      body: JSON.stringify({ pdfBase64: bytesNaBase64(pdfBytes), typ }),
-    });
+    const { getAI, getGenerativeModel, VertexAIBackend } = await import("firebase/ai");
+    const { firebaseApp } = await import("./firebase");
+    const ai = getAI(firebaseApp, { backend: new VertexAIBackend() });
+    const casti: Part[] = [
+      { inlineData: { mimeType: "application/pdf", data: bytesNaBase64(pdfBytes) } },
+      { text: pridatTyp(typ) },
+    ];
+
+    let posledniChyba: unknown = null;
+    for (const nazev of AI_MODELY) {
+      try {
+        const model = getGenerativeModel(ai, {
+          model: nazev,
+          generationConfig: { responseMimeType: "application/json", temperature: 0 },
+        });
+        const odpoved = await model.generateContent(casti);
+        const usage = odpoved.response.usageMetadata;
+        console.log("AI čtení zprávy:", nazev, "tokeny", usage?.promptTokenCount, "vstup /", usage?.candidatesTokenCount, "výstup");
+        return vyhodnotitOdpoved(odpoved.response.text());
+      } catch (err) {
+        posledniChyba = err;
+        const zprava = err instanceof Error ? err.message : String(err);
+        if (/not found|not available|no longer available|unsupported|not supported|404/i.test(zprava)) continue;
+        throw err;
+      }
+    }
+    throw posledniChyba ?? new Error("žádný dostupný model");
   } catch (err) {
-    return { ok: false, duvod: `volání Claude se nepovedlo: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  const text = await res.text();
-  try {
-    return JSON.parse(text) as ClaudeCteniVysledek;
-  } catch {
-    return { ok: false, duvod: `server vrátil neplatnou odpověď (HTTP ${res.status})` };
+    const zprava = err instanceof Error ? err.message : String(err);
+    if (CHYBA_KONFIGURACE_RE.test(zprava)) {
+      return {
+        ok: false,
+        chybaKonfigurace: true,
+        duvod: `AI nedostupná – zapni ve Firebase Console Build → AI Logic (Vertex AI) a tarif Blaze (${zprava.slice(0, 200)})`,
+      };
+    }
+    return { ok: false, duvod: `čtení AI selhalo: ${zprava}` };
   }
 }
 
@@ -121,7 +162,7 @@ export async function precistPreskocenePomociClaude(
       continue;
     }
     if (chybaKonfigurace) {
-      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: nedostupný (chybí GEMINI_API_KEY nebo ANTHROPIC_API_KEY na serveru)` });
+      zbyva.push({ ...p, duvod: `${p.duvod}; AI nedostupná (nastavení Firebase AI Logic)` });
       continue;
     }
     if (volani >= CLAUDE_MAX_VOLANI_NA_SOUBOR) {

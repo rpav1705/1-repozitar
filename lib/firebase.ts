@@ -21,6 +21,7 @@ const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
+export const firebaseApp = app;
 
 // Firebase Storage má u čtecích operací (getBytes/getBlob) defaultní
 // maxOperationRetryTime 2 minuty. Původně jsme ho kvůli podezření na
