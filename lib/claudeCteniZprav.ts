@@ -60,6 +60,8 @@ const AI_MODELY = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lit
 /** Novější modely bývají dostupné jen v "global" lokaci. */
 const AI_LOKACE = ["global", "us-central1"];
 let fungujiciModel: { nazev: string; lokace: string } | null = null;
+/** Nejdéle jak dlouho appka čeká na odpověď modelu (SDK má výchozích 180 s). */
+const AI_TIMEOUT_MS = 600_000;
 
 /** Chyby, které znamenají špatné nastavení projektu (ne problém konkrétní zprávy). */
 const CHYBA_KONFIGURACE_RE =
@@ -82,7 +84,7 @@ export async function precistZpravuPomociClaude(
     };
   }
   try {
-    const { getAI, getGenerativeModel, VertexAIBackend } = await import("firebase/ai");
+    const { getAI, getGenerativeModel, ThinkingLevel, VertexAIBackend } = await import("firebase/ai");
     const { firebaseApp } = await import("./firebase");
     const casti: Part[] = [
       { inlineData: { mimeType: "application/pdf", data: bytesNaBase64(pdfBytes) } },
@@ -100,11 +102,30 @@ export async function precistZpravuPomociClaude(
     for (const { nazev, lokace } of kandidati) {
       try {
         const ai = getAI(firebaseApp, { backend: new VertexAIBackend(lokace) });
-        const model = getGenerativeModel(ai, {
-          model: nazev,
-          generationConfig: { responseMimeType: "application/json", temperature: 0 },
-        });
-        const odpoved = await model.generateContent(casti);
+        // Čtení údajů z formuláře nepotřebuje dlouhé "přemýšlení" modelu – nízká
+        // úroveň zkracuje odpověď (u skenu o 14 stranách jinak hrozí timeout)
+        // i cenu. Model, který nastavení úrovně nezná, se zopakuje bez něj.
+        const zavolej = (nizkeMysleni: boolean) =>
+          getGenerativeModel(
+            ai,
+            {
+              model: nazev,
+              generationConfig: {
+                responseMimeType: "application/json",
+                temperature: 0,
+                ...(nizkeMysleni ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+              },
+            },
+            // Výchozí timeout SDK je 180 s – na sken o desítkách stran nestačí.
+            { timeout: AI_TIMEOUT_MS }
+          ).generateContent(casti);
+        let odpoved;
+        try {
+          odpoved = await zavolej(true);
+        } catch (err) {
+          if (!/thinking/i.test(err instanceof Error ? err.message : String(err))) throw err;
+          odpoved = await zavolej(false);
+        }
         fungujiciModel = { nazev, lokace };
         const usage = odpoved.response.usageMetadata;
         console.log("AI čtení zprávy:", nazev, lokace, "tokeny", usage?.promptTokenCount, "vstup /", usage?.candidatesTokenCount, "výstup");
