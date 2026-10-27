@@ -81,13 +81,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Poskytovatel se vybírá podle klíče: GEMINI_API_KEY má přednost, jinak ANTHROPIC_API_KEY.
+  const geminiKey = process.env.GEMINI_API_KEY;
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  if (!geminiKey && !apiKey) {
     return odpoved(
       {
         ok: false,
         chybaKonfigurace: true,
-        duvod: "na serveru chybí proměnná prostředí ANTHROPIC_API_KEY (nastav ji na Vercelu a nasaď znovu)",
+        duvod: "na serveru chybí GEMINI_API_KEY (nebo ANTHROPIC_API_KEY) – nastav ho na Vercelu a nasaď znovu",
       },
       503
     );
@@ -104,12 +106,16 @@ export async function POST(request: NextRequest) {
   }
   const typ = typeof body.typ === "string" && jeTypRevize(body.typ) ? body.typ : "elektro";
 
+  if (geminiKey) {
+    return odpovedGemini(geminiKey, body.pdfBase64, typ);
+  }
+
   let apiRes: Response;
   try {
     apiRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "x-api-key": apiKey,
+        "x-api-key": apiKey ?? "",
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
@@ -158,42 +164,102 @@ export async function POST(request: NextRequest) {
     // Spotřeba jednoho volání do Vercel Logs – podle ní jde spočítat skutečná cena.
     console.log("Claude čtení zprávy: tokeny", api.usage?.input_tokens, "vstup /", api.usage?.output_tokens, "výstup");
     const text = (api.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
-    const data = vyjmoutJson(text) as Record<string, unknown>;
-
-    if (data.je_revizni_zprava === false) {
-      return odpoved({ ok: false, duvod: `Claude: nejde o revizní zprávu (${textNeboNull(data.poznamka) ?? "bez vysvětlení"})` });
-    }
-    const cislo = textNeboNull(data.cislo_zarizeni)?.replace(/\s+/g, "") ?? null;
-    const datum = platneDatum(data.datum_provedeni);
-    const termin = platneDatum(data.novy_termin);
-    const poznamka = textNeboNull(data.poznamka) ?? "";
-    if (!cislo || !datum || !termin) {
-      const chybi = [!cislo && "číslo zařízení", !datum && "datum provedení", !termin && "termín příští revize"]
-        .filter(Boolean)
-        .join(", ");
-      return odpoved({ ok: false, duvod: `Claude nenašel: ${chybi}${poznamka ? ` (${poznamka})` : ""}` });
-    }
-    const jistota =
-      data.jistota === "vysoka" || data.jistota === "stredni" || data.jistota === "nizka" ? data.jistota : "nizka";
-    const druh =
-      data.druh_revize === "provozni" || data.druh_revize === "vnitrni" || data.druh_revize === "zkouska"
-        ? data.druh_revize
-        : null;
-
-    return odpoved({
-      ok: true,
-      cislo_zarizeni: cislo,
-      datum_provedeni: datum,
-      novy_termin: termin,
-      celkove_hodnoceni: textNeboNull(data.celkove_hodnoceni) ?? "",
-      zjistena_zavada: textNeboNull(data.zjistena_zavada),
-      technik_jmeno: textNeboNull(data.technik_jmeno),
-      technik_cislo_opravneni: textNeboNull(data.technik_cislo_opravneni),
-      druh_revize: druh,
-      jistota,
-      poznamka,
-    });
+    return vyhodnotitOdpoved(text);
   } catch (err) {
     return odpoved({ ok: false, duvod: `odpověď Claude se nepodařilo zpracovat: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/** Zvaliduje JSON z modelu (Claude i Gemini) a vrátí odpověď route. */
+function vyhodnotitOdpoved(text: string) {
+  const data = vyjmoutJson(text) as Record<string, unknown>;
+
+  if (data.je_revizni_zprava === false) {
+    return odpoved({ ok: false, duvod: `Claude: nejde o revizní zprávu (${textNeboNull(data.poznamka) ?? "bez vysvětlení"})` });
+  }
+  const cislo = textNeboNull(data.cislo_zarizeni)?.replace(/\s+/g, "") ?? null;
+  const datum = platneDatum(data.datum_provedeni);
+  const termin = platneDatum(data.novy_termin);
+  const poznamka = textNeboNull(data.poznamka) ?? "";
+  if (!cislo || !datum || !termin) {
+    const chybi = [!cislo && "číslo zařízení", !datum && "datum provedení", !termin && "termín příští revize"]
+      .filter(Boolean)
+      .join(", ");
+    return odpoved({ ok: false, duvod: `Claude nenašel: ${chybi}${poznamka ? ` (${poznamka})` : ""}` });
+  }
+  const jistota =
+    data.jistota === "vysoka" || data.jistota === "stredni" || data.jistota === "nizka" ? data.jistota : "nizka";
+  const druh =
+    data.druh_revize === "provozni" || data.druh_revize === "vnitrni" || data.druh_revize === "zkouska"
+      ? data.druh_revize
+      : null;
+
+  return odpoved({
+    ok: true,
+    cislo_zarizeni: cislo,
+    datum_provedeni: datum,
+    novy_termin: termin,
+    celkove_hodnoceni: textNeboNull(data.celkove_hodnoceni) ?? "",
+    zjistena_zavada: textNeboNull(data.zjistena_zavada),
+    technik_jmeno: textNeboNull(data.technik_jmeno),
+    technik_cislo_opravneni: textNeboNull(data.technik_cislo_opravneni),
+    druh_revize: druh,
+    jistota,
+    poznamka,
+  });
+}
+
+/** Čtení přes Google Gemini (REST) – stejný prompt a validace jako u Claude. Model jde změnit proměnnou GEMINI_MODEL. */
+async function odpovedGemini(klic: string, pdfBase64: string, typ: string) {
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  let apiRes: Response;
+  try {
+    apiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": klic, "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ inline_data: { mime_type: "application/pdf", data: pdfBase64 } }, { text: pridatTyp(typ) }],
+          },
+        ],
+        generationConfig: { responseMimeType: "application/json", temperature: 0 },
+      }),
+    });
+  } catch (err) {
+    return odpoved({ ok: false, duvod: `API Gemini je nedostupné: ${err instanceof Error ? err.message : String(err)}` }, 502);
+  }
+
+  const apiText = await apiRes.text();
+  if (!apiRes.ok) {
+    console.error("Gemini API chyba", apiRes.status, apiText.slice(0, 500));
+    let detail = "";
+    try {
+      detail = JSON.parse(apiText)?.error?.message ?? "";
+    } catch {
+      // necháme prázdné
+    }
+    return odpoved({ ok: false, duvod: `API Gemini vrátilo HTTP ${apiRes.status}${detail ? `: ${detail}` : ""}` }, 502);
+  }
+
+  try {
+    const api = JSON.parse(apiText) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+    };
+    console.log(
+      "Gemini čtení zprávy:",
+      model,
+      "tokeny",
+      api.usageMetadata?.promptTokenCount,
+      "vstup /",
+      api.usageMetadata?.candidatesTokenCount,
+      "výstup"
+    );
+    const text = (api.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("");
+    return vyhodnotitOdpoved(text);
+  } catch (err) {
+    return odpoved({ ok: false, duvod: `odpověď Gemini se nepodařilo zpracovat: ${err instanceof Error ? err.message : String(err)}` });
   }
 }

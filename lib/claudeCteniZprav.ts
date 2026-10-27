@@ -121,7 +121,7 @@ export async function precistPreskocenePomociClaude(
       continue;
     }
     if (chybaKonfigurace) {
-      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: nedostupný (chybí ANTHROPIC_API_KEY na serveru)` });
+      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: nedostupný (chybí GEMINI_API_KEY nebo ANTHROPIC_API_KEY na serveru)` });
       continue;
     }
     if (volani >= CLAUDE_MAX_VOLANI_NA_SOUBOR) {
