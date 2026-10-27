@@ -50,8 +50,16 @@ export const CLAUDE_MAX_BYTES_PDF = 14_000_000;
 /** Maximum stránek jedné zprávy, které appka modelu pošle (ochrana před cenou). */
 export const CLAUDE_MAX_STRAN = 20;
 
-/** Stejný seznam modelů jako v appce Nákupní požadavky (nakup.html) – neexistující model se přeskočí. */
-const AI_MODELY = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"];
+/**
+ * Modely Gemini na Vertex AI, od nejnovějšího stabilního (viz
+ * https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions):
+ * gemini-2.5-flash skončil 20. 10. 2026, gemini-2.0-flash 1. 6. 2026.
+ * Neexistující model se přeskočí.
+ */
+const AI_MODELY = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+/** Novější modely bývají dostupné jen v "global" lokaci. */
+const AI_LOKACE = ["global", "us-central1"];
+let fungujiciModel: { nazev: string; lokace: string } | null = null;
 
 /** Chyby, které znamenají špatné nastavení projektu (ne problém konkrétní zprávy). */
 const CHYBA_KONFIGURACE_RE =
@@ -76,31 +84,41 @@ export async function precistZpravuPomociClaude(
   try {
     const { getAI, getGenerativeModel, VertexAIBackend } = await import("firebase/ai");
     const { firebaseApp } = await import("./firebase");
-    const ai = getAI(firebaseApp, { backend: new VertexAIBackend() });
     const casti: Part[] = [
       { inlineData: { mimeType: "application/pdf", data: bytesNaBase64(pdfBytes) } },
       { text: pridatTyp(typ) },
     ];
 
-    let posledniChyba: unknown = null;
-    for (const nazev of AI_MODELY) {
+    // Dřív ověřená dvojice model + lokace se zkouší první (ať se u každé
+    // stránky znovu neprochází seznam).
+    const kandidati = [
+      ...(fungujiciModel ? [fungujiciModel] : []),
+      ...AI_MODELY.flatMap((nazev) => AI_LOKACE.map((lokace) => ({ nazev, lokace }))),
+    ].filter((k, i, vse) => vse.findIndex((v) => v.nazev === k.nazev && v.lokace === k.lokace) === i);
+
+    const nedostupne: string[] = [];
+    for (const { nazev, lokace } of kandidati) {
       try {
+        const ai = getAI(firebaseApp, { backend: new VertexAIBackend(lokace) });
         const model = getGenerativeModel(ai, {
           model: nazev,
           generationConfig: { responseMimeType: "application/json", temperature: 0 },
         });
         const odpoved = await model.generateContent(casti);
+        fungujiciModel = { nazev, lokace };
         const usage = odpoved.response.usageMetadata;
-        console.log("AI čtení zprávy:", nazev, "tokeny", usage?.promptTokenCount, "vstup /", usage?.candidatesTokenCount, "výstup");
+        console.log("AI čtení zprávy:", nazev, lokace, "tokeny", usage?.promptTokenCount, "vstup /", usage?.candidatesTokenCount, "výstup");
         return vyhodnotitOdpoved(odpoved.response.text());
       } catch (err) {
-        posledniChyba = err;
         const zprava = err instanceof Error ? err.message : String(err);
-        if (/not found|not available|no longer available|unsupported|not supported|404/i.test(zprava)) continue;
+        if (/not found|not available|no longer available|unsupported|not supported|404/i.test(zprava)) {
+          nedostupne.push(`${nazev}@${lokace}`);
+          continue;
+        }
         throw err;
       }
     }
-    throw posledniChyba ?? new Error("žádný dostupný model");
+    throw new Error(`žádný model není dostupný (zkoušeno: ${nedostupne.join(", ")}) – zkontroluj názvy modelů v lib/claudeCteniZprav.ts`);
   } catch (err) {
     const zprava = err instanceof Error ? err.message : String(err);
     if (CHYBA_KONFIGURACE_RE.test(zprava)) {
