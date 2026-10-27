@@ -1099,6 +1099,194 @@ function extractObjektZprava(lines: string[]) {
 
 // ---------------------------------------------------------------------------
 
+// Šablona G: "ZPRÁVA O REVIZI – REVIZE ELEKTRICKÉ INSTALACE (ČSN 33 2000-6)"
+// z generátoru Revizero ("REV-2026-089" nahoře, PDF o ~12 stranách, bez
+// uvedeného počtu stran). Nadpisy sekcí jsou písmenkované velkými písmeny
+// ("Z Á VA D Y", "P Ř E D M Ě T  R E V I Z E") a diakritika bývá v samostatných
+// textových položkách, proto se vše porovnává po odstranění VŠECH mezer
+// (viz bezMezer). Zpráva je na úvodní straně hlavička s tabulkou
+// "Předmět revize | Datum zahájení | Datum ukončení | Příští revize" a zbytek
+// se vyskládá až do další titulní stránky.
+// ---------------------------------------------------------------------------
+
+function bezMezer(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
+/** Velká písmena bez mezer, číslic a interpunkce – pro porovnání písmenkovaných nadpisů. */
+function nadpisPismena(line: string): string {
+  return line.replace(/[^\p{L}]/gu, "").toUpperCase();
+}
+
+/** Titulní strana: "ZPRÁVA O REVIZI" + "REVIZE ELEKTRICKÉ INSTALACE" + číslo revize "REV-RRRR-NNN" v záhlaví. */
+function jeTitulniStrankaRevizero(lines: string[]): boolean {
+  const zacatek = bezMezer(lines.slice(0, 8).join("\n")).toUpperCase();
+  return (
+    /REV-\d{4}-\d+/.test(zacatek) &&
+    zacatek.includes("ZPRÁVAOREVIZI") &&
+    zacatek.includes("REVIZEELEKTROINSTALACE")
+  );
+}
+
+/**
+ * Číslo zařízení = označení rozvaděče, které začíná předmět revize
+ * ("RA1 - Rozvaděč elektrické instalace společnosti …" v prvním sloupci
+ * tabulky pod nadpisem "PŘEDMĚT REVIZE"). Záloha: nadpis sekce rozvaděče
+ * ("ROZVADĚČ: RA1 (PODRUŽNÝ ROZVADĚČ)").
+ */
+function extractCisloZarizeniRevizero(lines: string[]): string | null {
+  const platne = (kod: string): string | null => {
+    const cisty = bezMezer(kod);
+    return /^[A-Za-z]+[A-Za-z0-9_/]*\d[A-Za-z0-9_/]*$/.test(cisty) ? cisty : null;
+  };
+
+  const idx = lines.findIndex((l) => bezMezer(l).toUpperCase().startsWith("PŘEDMĚTREVIZE"));
+  if (idx !== -1) {
+    for (const line of lines.slice(idx + 1, idx + 4)) {
+      const match = line.match(/^\s*([\p{L}\p{N}_/ ]{1,20}?)\s+[-–]\s/u);
+      const kod = match ? platne(match[1]) : null;
+      if (kod) return kod;
+    }
+  }
+
+  for (const line of lines) {
+    const match = bezMezer(line).toUpperCase().match(/^ROZVADĚČ:([A-Z0-9_/]+?)\(/);
+    const kod = match ? platne(match[1]) : null;
+    if (kod) return kod;
+  }
+  return null;
+}
+
+/**
+ * Datumy z tabulky pod "PŘEDMĚT REVIZE … DATUM ZAHÁJENÍ DATUM UKONČENÍ
+ * PŘÍŠTÍ REVIZE" (až po "KLIENT / OBJEDNATEL"). Sloupce se po sloučení řádků
+ * míchají (příští revize je na řádku s názvem předmětu, obě dnešní data na
+ * dalším), proto se neřídí pozicí: nejpozdější datum je příští revize, z
+ * ostatních (zahájení, ukončení) se bere poslední v pořadí = ukončení. Když
+ * hlavička data neobsahuje, použije se záloha "Datum zahájení revize:".
+ */
+function extractDatumyRevizero(lines: string[]): { provedeni: Date | null; termin: Date | null } {
+  const idx = lines.findIndex((l) => bezMezer(l).toUpperCase().startsWith("PŘEDMĚTREVIZE"));
+  const konec = lines.findIndex((l, i) => i > idx && bezMezer(l).toUpperCase().startsWith("KLIENT"));
+  const blok = idx === -1 ? [] : lines.slice(idx + 1, konec === -1 ? idx + 8 : konec);
+
+  const data: Date[] = [];
+  for (const line of blok) {
+    for (const m of line.matchAll(/(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})/g)) {
+      const d = parseFlexibleDate(`${m[1]}.${m[2]}.${m[3]}`);
+      if (d) data.push(d);
+    }
+  }
+
+  let provedeni: Date | null = null;
+  let termin: Date | null = null;
+  if (data.length >= 2) {
+    const maxIdx = data.reduce((best, d, i) => (d.getTime() > data[best].getTime() ? i : best), 0);
+    termin = data[maxIdx];
+    const ostatni = data.filter((_, i) => i !== maxIdx);
+    provedeni = ostatni[ostatni.length - 1];
+  }
+  if (!provedeni) {
+    const raw =
+      findFuzzyValueAfterLabel(lines, "Datum ukončení revize:") ??
+      findFuzzyValueAfterLabel(lines, "Datum zahájení revize:");
+    provedeni = raw ? parseFlexibleDate(raw.replace(/\s+/g, "")) : null;
+  }
+  if (provedeni && termin && termin.getTime() <= provedeni.getTime()) termin = null;
+  return { provedeni, termin };
+}
+
+/**
+ * Jméno technika je pod nadpisem "REVIZNÍ TECHNIK | PODPIS REVIZNÍHO TECHNIKA"
+ * na poslední straně (ne "Revizní technik (předchozí revize)" na první –
+ * to je technik minulé revize). Oprávnění = "Osvědčení č.:" pod ním.
+ */
+function extractTechnikRevizero(lines: string[]): { jmeno: string | null; opravneni: string | null } {
+  const idx = lines.findIndex((l) => bezMezer(l).toUpperCase().startsWith("REVIZNÍTECHNIKPODPIS"));
+  if (idx === -1) return { jmeno: null, opravneni: null };
+
+  const JMENO_RE = /^\p{Lu}[\p{L}.'-]*(?:\s+\p{Lu}[\p{L}.'-]*){1,3}$/u;
+  let jmeno: string | null = null;
+  for (const line of lines.slice(idx + 1, idx + 5)) {
+    if (!line.trim() || nadpisPismena(line) === "TECHNIKA") continue;
+    const radek = line.trim();
+    const varianty = [radek.replace(/\s+/g, " "), radek.replace(/\s{2,}/g, "")];
+    jmeno = varianty.find((v) => JMENO_RE.test(v)) ?? null;
+    break;
+  }
+
+  const raw = findFuzzyValueAfterLabel(lines.slice(idx), "Osvědčení č.:");
+  return { jmeno, opravneni: raw ? raw.replace(/\s+/g, "") : null };
+}
+
+/**
+ * Výsledek podle sekce "ZÁVADY" (až po "ZÁVĚR REVIZE"): "Žádné závady nebyly
+ * zjištěny" = OK, jakýkoli jiný text = NOK (text je pak zjištěná závada).
+ * "Celkový posudek" slouží k zobrazení; "neschopno provozu" vynutí NOK i při
+ * prázdné sekci závad.
+ */
+function extractVysledekRevizero(lines: string[]): {
+  vysledek_revize: VysledekRevize;
+  zjistena_zavada: string | null;
+  celkove_hodnoceni: string;
+} {
+  const odstranZnacky = (l: string) => l.replace(/[✓✔✗✘]/gu, "").trim();
+
+  const zavadyIdx = lines.findIndex((l) => nadpisPismena(l) === "ZÁVADY");
+  let vysledek: VysledekRevize = "KE_KONTROLE";
+  let zavada: string | null = null;
+  if (zavadyIdx !== -1) {
+    const konec = lines.findIndex((l, i) => i > zavadyIdx && nadpisPismena(l) === "ZÁVĚRREVIZE");
+    const text = (konec === -1 ? lines.slice(zavadyIdx + 1, zavadyIdx + 6) : lines.slice(zavadyIdx + 1, konec))
+      .map(odstranZnacky)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text) {
+      if (/žádnézávadynebylyzjištěny/i.test(bezMezer(text))) {
+        vysledek = "OK";
+      } else {
+        vysledek = "NOK";
+        zavada = text;
+      }
+    }
+  }
+
+  let hodnoceni = "";
+  const posudekIdx = lines.findIndex((l) => nadpisPismena(l).startsWith("CELKOVÝPOSUDEK"));
+  if (posudekIdx !== -1) {
+    const konec = lines.findIndex((l, i) => i > posudekIdx && /^Posudek\b/i.test(l.trim()));
+    hodnoceni = lines
+      .slice(posudekIdx + 1, konec === -1 ? posudekIdx + 4 : konec)
+      .map(odstranZnacky)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      // osamocená velká písmena s diakritikou ("ZA Ř ÍZENÍ") zpět do slova
+      .replace(/(\p{L}) ([ĚŠČŘŽÝÁÍÉŇÓÚŮŤĎ]) (?=\p{L})/gu, "$1$2")
+      .trim();
+  }
+  if (/NESCHOPN/i.test(bezMezer(hodnoceni))) vysledek = "NOK";
+
+  return { vysledek_revize: vysledek, zjistena_zavada: zavada, celkove_hodnoceni: hodnoceni };
+}
+
+function extractRevizeroZprava(lines: string[]) {
+  const { provedeni, termin } = extractDatumyRevizero(lines);
+  const technik = extractTechnikRevizero(lines);
+  return {
+    cislo_zarizeni: extractCisloZarizeniRevizero(lines),
+    datum_provedeni: provedeni,
+    novy_termin: termin,
+    technik_jmeno: technik.jmeno,
+    technik_cislo_opravneni: technik.opravneni,
+    ...extractVysledekRevizero(lines),
+  };
+}
+
+// ---------------------------------------------------------------------------
+
 // Šablona E: "REVIZNÍ ZPRÁVA o revizi tlakové nádoby stabilní" (zákon
 // č. 250/2021 Sb., NV č. 192/2022 Sb.) – jedna zpráva na víc stránek, bez
 // uvedeného počtu stran (appka spojuje stránky až do další titulní stránky).
@@ -1524,6 +1712,7 @@ type Sablona =
   | "pracovni_stroj"
   | "elektricke_zarizeni"
   | "elektricke_zarizeni_objekt"
+  | "elektro_revizero"
   | "tlakova_nadoba";
 
 /**
@@ -1542,6 +1731,7 @@ function detectSablona(lines: string[]): Sablona | null {
   if (/revizi\s+elektrického\s+zařízení\s+pracovního\s+stroje/i.test(text)) return "pracovni_stroj";
   if (/revizi\s+elektrického\s+spotřebiče/i.test(text)) return "spotrebic";
   if (jeTitulniStrankaTlakoveNadoby(text)) return "tlakova_nadoba";
+  if (jeTitulniStrankaRevizero(lines)) return "elektro_revizero";
   if (new RegExp(fuzzy("Revidovaný objekt:"), "i").test(text)) {
     return "elektricke_zarizeni_objekt";
   }
@@ -1804,6 +1994,53 @@ export async function parseRevizniZpravyPdf(
             stranka,
             duvod: "nepodařilo se rozpoznat termín příští revize (šablona: elektrické zařízení)",
           });
+          stranka += pocetStran;
+          continue;
+        }
+
+        zpravy.push({
+          cislo_zarizeni: extracted.cislo_zarizeni,
+          datum_provedeni: extracted.datum_provedeni,
+          novy_termin: extracted.novy_termin,
+          celkove_hodnoceni: extracted.celkove_hodnoceni,
+          vysledek_revize: extracted.vysledek_revize,
+          zjistena_zavada: extracted.zjistena_zavada,
+          technik_jmeno: extracted.technik_jmeno,
+          technik_cislo_opravneni: extracted.technik_cislo_opravneni,
+          stranka,
+          pocet_stran: pocetStran,
+        });
+        stranka += pocetStran;
+        continue;
+      }
+
+      if (sablona === "elektro_revizero") {
+        // Zpráva nemá uvedený počet stran – stejný princip jako u tlakových
+        // nádob: další stránky se přidávají až po další titulní stránku.
+        let pocetStran = 1;
+        const vsechnyRadky = [...lines];
+        while (stranka + pocetStran <= doc.numPages) {
+          const dalsiRadky = await radkyStranky(stranka + pocetStran);
+          if (jeTitulniStrankaRevizero(dalsiRadky)) break;
+          vsechnyRadky.push(...dalsiRadky);
+          pocetStran += 1;
+        }
+
+        const extracted = extractRevizeroZprava(vsechnyRadky);
+        const popis = "šablona: elektro revize Revizero";
+
+        if (!extracted.cislo_zarizeni) {
+          preskoceno.push({ stranka, duvod: `nepodařilo se najít označení rozvaděče v předmětu revize (${popis})` });
+          stranka += pocetStran;
+          continue;
+        }
+        if (!extracted.datum_provedeni) {
+          preskoceno.push({ stranka, duvod: `nepodařilo se najít datum provedení revize (${popis})` });
+          stranka += pocetStran;
+          continue;
+        }
+        if (!extracted.novy_termin) {
+          preskoceno.push({ stranka, duvod: `nepodařilo se rozpoznat termín příští revize (${popis})` });
           stranka += pocetStran;
           continue;
         }
