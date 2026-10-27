@@ -169,25 +169,29 @@ export async function precistPreskocenePomociClaude(
     };
   }
 
+  // Naskenované stránky (parser z nich nepřečetl žádný text) navazující na
+  // předchozí přeskočenou naskenovanou stránku patří k téže zprávě – model
+  // dostane celou zprávu najednou (jedno volání místo jednoho na stránku).
+  const jeSken = (p: SkippedPage) => p.duvod.includes('obsah stránky: ""');
+  const skenovane = new Set(preskoceno.filter(jeSken).map((p) => p.stranka));
+  const navazujici = new Set(preskoceno.filter((p) => jeSken(p) && skenovane.has(p.stranka - 1)).map((p) => p.stranka));
+
   const hranice = [
-    ...new Set([...zpravyParseru.map((z) => z.stranka), ...preskoceno.map((p) => p.stranka)].filter((s) => s > 0)),
+    ...new Set(
+      [...zpravyParseru.map((z) => z.stranka), ...preskoceno.filter((p) => !navazujici.has(p.stranka)).map((p) => p.stranka)].filter(
+        (s) => s > 0
+      )
+    ),
   ].sort((a, b) => a - b);
 
+  const pokryto = new Set<number>();
   let volani = 0;
   for (const p of preskoceno) {
+    if (navazujici.has(p.stranka)) continue; // přečte se spolu s první stránkou zprávy
     if (p.stranka <= 0 || p.stranka > zdroj.pocetStran) {
       zbyva.push(p);
       continue;
     }
-    if (chybaKonfigurace) {
-      zbyva.push({ ...p, duvod: `${p.duvod}; AI nedostupná (nastavení Firebase AI Logic)` });
-      continue;
-    }
-    if (volani >= CLAUDE_MAX_VOLANI_NA_SOUBOR) {
-      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: překročen limit ${CLAUDE_MAX_VOLANI_NA_SOUBOR} volání na soubor` });
-      continue;
-    }
-    volani += 1;
 
     const dalsiHranice = hranice.find((s) => s > p.stranka);
     const konec = Math.min(
@@ -196,6 +200,21 @@ export async function precistPreskocenePomociClaude(
       p.stranka + CLAUDE_MAX_STRAN - 1
     );
     const strany = Array.from({ length: konec - p.stranka + 1 }, (_, i) => p.stranka + i);
+    strany.forEach((s) => pokryto.add(s));
+    // Všechny přeskočené stránky téhle zprávy (první + navazující sken) – při nezdaru zůstanou nerozpoznané.
+    const skupina = preskoceno.filter((q) => strany.includes(q.stranka));
+    const nepodarilo = (dodatek: string) =>
+      skupina.forEach((q) => zbyva.push({ ...q, duvod: `${q.duvod}; ${dodatek}` }));
+
+    if (chybaKonfigurace) {
+      nepodarilo("AI nedostupná (nastavení Firebase AI Logic)");
+      continue;
+    }
+    if (volani >= CLAUDE_MAX_VOLANI_NA_SOUBOR) {
+      nepodarilo(`Claude: překročen limit ${CLAUDE_MAX_VOLANI_NA_SOUBOR} volání na soubor`);
+      continue;
+    }
+    volani += 1;
 
     let vysledek: ClaudeCteniVysledek;
     try {
@@ -206,14 +225,13 @@ export async function precistPreskocenePomociClaude(
 
     if (!vysledek.ok) {
       if (vysledek.chybaKonfigurace) chybaKonfigurace = true;
-      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: ${vysledek.duvod}` });
+      nepodarilo(`Claude: ${vysledek.duvod}`);
     } else if (vysledek.jistota === "nizka") {
-      zbyva.push({
-        ...p,
-        duvod: `${p.duvod}; Claude si není jistý (navrhuje ${vysledek.cislo_zarizeni}${
+      nepodarilo(
+        `Claude si není jistý (navrhuje ${vysledek.cislo_zarizeni}${
           vysledek.poznamka ? `: ${vysledek.poznamka}` : ""
-        }) – zpráva se neuložila`,
-      });
+        }) – zpráva se neuložila`
+      );
     } else {
       prectene.push({
         cislo_zarizeni: vysledek.cislo_zarizeni,
@@ -229,6 +247,13 @@ export async function precistPreskocenePomociClaude(
         ...(vysledek.druh_revize ? { druh_revize: vysledek.druh_revize } : {}),
         cteno_claude: true,
       });
+    }
+  }
+
+  // Navazující sken za limitem CLAUDE_MAX_STRAN stran jedné zprávy se nepřečetl.
+  for (const p of preskoceno) {
+    if (navazujici.has(p.stranka) && !pokryto.has(p.stranka)) {
+      zbyva.push({ ...p, duvod: `${p.duvod}; Claude: stránka je za limitem ${CLAUDE_MAX_STRAN} stran jedné zprávy` });
     }
   }
 
