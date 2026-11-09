@@ -959,6 +959,14 @@ function extractCisloZarizeniObjekt(lines: string[]): string | null {
   );
   const okno = lines.slice(idx, dalsiPopisekIdx === -1 ? idx + 8 : dalsiPopisekIdx).join(" ");
 
+  // "Silo Barcode Systém – inventární číslo: SILOROZ" – kód je za popiskem
+  // "inventární číslo:", ne za pomlčkou (ta by dala "inventárníčíslo:SILOROZ",
+  // což se kvůli dvojtečce zahodí jako nenalezené číslo).
+  const inventarni = okno.match(/inventární\s*číslo\s*:\s*(.*)$/i);
+  if (inventarni) {
+    return vycistiCisloZarizeni(inventarni[1].replace(/\s+/g, "").replace(/[.,;]+$/, "") || null);
+  }
+
   const posledniPomlckaIdx = okno.lastIndexOf("–");
   if (posledniPomlckaIdx === -1) return null;
 
@@ -1015,8 +1023,12 @@ function extractTechnikJmenoObjekt(lines: string[]): string | null {
 
 /** "osv.č.: 2578/24/R-EZ-E1A,E1B" – evidenční číslo oprávnění technika. */
 function extractCisloOpravneniObjekt(lines: string[]): string | null {
-  const raw = findFuzzyValueAfterLabel(lines, "osv.č.:");
-  return raw ? raw.replace(/\s+/g, "") : null;
+  // Dvojtečka za popiskem je nepovinná ("osv.č. 2578/24/R-EZ-E1A,E1B") a v
+  // druhém sloupci řádku bývá adresa objektu ("… Průmyslová 954 Planá n./,Lužnicí")
+  // – bere se proto jen první sloupec za popiskem.
+  const raw = findFuzzyValueAfterLabel(lines, "osv.č.");
+  const sloupec = raw?.replace(/^\s*:?/, "").trim().split(/\s{2,}/)[0];
+  return sloupec ? sloupec.replace(/\s+/g, "") : null;
 }
 
 /**
