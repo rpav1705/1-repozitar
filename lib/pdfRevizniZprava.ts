@@ -297,12 +297,12 @@ function extractInventarniCisloSpotrebic(lines: string[]): string | null {
 }
 
 function extractDatumProvedeniSpotrebic(lines: string[]): Date | null {
-  const raw = findValueAfterLabel(lines, /Revize byla provedena dne:\s*(\d{1,2}\.\d{1,2}\.\d{4})/);
+  const raw = findValueAfterLabel(lines, /(?:Revize|Kontrola) byla provedena dne:\s*(\d{1,2}\.\d{1,2}\.\d{4})/);
   return raw ? parseFlexibleDate(raw) : null;
 }
 
 function extractTerminSpotrebic(lines: string[]): Date | null {
-  const raw = findValueAfterLabel(lines, /Řádný termín příští revize je nejpozději do:\s*(.+)/);
+  const raw = findValueAfterLabel(lines, /Řádný termín příští (?:revize|kontroly) je nejpozději do:\s*(.+)/);
   return raw ? parseTerminHodnota(raw) : null;
 }
 
@@ -313,7 +313,7 @@ function extractTerminSpotrebic(lines: string[]): Date | null {
  * oddělené i po reconstructLines) a vezmeme poslední neprázdný sloupec.
  */
 function extractTechnikJmenoSpotrebic(lines: string[]): string | null {
-  const idx = lines.findIndex((l) => /Revizi provedl a protokol vystavil:/.test(l));
+  const idx = lines.findIndex((l) => /(?:Revizi|Kontrolu) provedl a protokol vystavil:/.test(l));
   const nextLine = idx !== -1 ? lines[idx + 1] : undefined;
   if (!nextLine) return null;
   const columns = nextLine.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean);
@@ -377,7 +377,7 @@ function extractZjistenaZavadaSpotrebic(lines: string[]): string | null {
   const parts = afterLabel ? [afterLabel] : [];
 
   for (let i = idx + 1; i < lines.length; i++) {
-    if (/Revize byla provedena dne:/.test(lines[i])) break;
+    if (/(?:Revize|Kontrola) byla provedena dne:/.test(lines[i])) break;
     const text = lines[i].trim();
     if (text) parts.push(text);
   }
@@ -1729,7 +1729,12 @@ function detectSablona(lines: string[]): Sablona | null {
   // písmeny ("ZPRÁVA O REVIZI ELEKTRICKÉHO ZAŘÍZENÍ PRACOVNÍHO STROJE"), jinak by
   // spadl pod šablonu C (stejný začátek nadpisu).
   if (/revizi\s+elektrického\s+zařízení\s+pracovního\s+stroje/i.test(text)) return "pracovni_stroj";
-  if (/revizi\s+elektrického\s+spotřebiče/i.test(text)) return "spotrebic";
+  // "Protokol o pravidelné kontrole svařovacího zařízení dle ČSN 60974-4" –
+  // stejný formulář (ILLKO Studio) jako spotřebič, jen jiný nadpis a slovo
+  // "kontrola" místo "revize" v popiscích.
+  if (/revizi\s+elektrického\s+spotřebiče/i.test(text) || /kontrole\s+svařovacího\s+zařízení/i.test(text)) {
+    return "spotrebic";
+  }
   if (jeTitulniStrankaTlakoveNadoby(text)) return "tlakova_nadoba";
   if (jeTitulniStrankaRevizero(lines)) return "elektro_revizero";
   if (new RegExp(fuzzy("Revidovaný objekt:"), "i").test(text)) {
