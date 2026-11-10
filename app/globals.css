@@ -35,13 +35,13 @@
    (přehled revizí, ceník, import, administrace). Záhlaví (thead) se
    nepodbarvuje; barva přebije i případné pozadí řádku (aktuální měsíc v ceníku). */
 tbody tr:hover {
-  background-color: #e8eef6;
+  background-color: #dbe6f3;
 }
 
 /* Řádek označený kliknutím (viz components/VyberRadkuTabulky.tsx) zůstane
    podbarvený i po odjetí myši. */
 tbody tr[data-vybrano] {
-  background-color: #d3e0f1;
+  background-color: #bcd1ea;
 }
 
 body {
