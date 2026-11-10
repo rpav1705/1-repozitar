@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { TypRevizeProvider } from "@/lib/TypRevizeContext";
+import VyberRadkuTabulky from "@/components/VyberRadkuTabulky";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -33,6 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full flex flex-col">
         <TypRevizeProvider>{children}</TypRevizeProvider>
+        <VyberRadkuTabulky />
       </body>
     </html>
   );
