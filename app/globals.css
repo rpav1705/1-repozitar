@@ -31,6 +31,13 @@
   --color-status-missing: var(--color-status-missing);
 }
 
+/* Podbarvení řádku tabulky, nad kterým je myš – všechny tabulky v appce
+   (přehled revizí, ceník, import, administrace). Záhlaví (thead) se
+   nepodbarvuje; barva přebije i případné pozadí řádku (aktuální měsíc v ceníku). */
+tbody tr:hover {
+  background-color: #e8eef6;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
