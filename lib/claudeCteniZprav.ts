@@ -197,6 +197,21 @@ export async function precistPreskocenePomociClaude(
   const skenovane = new Set(preskoceno.filter(jeSken).map((p) => p.stranka));
   const navazujici = new Set(preskoceno.filter((p) => jeSken(p) && skenovane.has(p.stranka - 1)).map((p) => p.stranka));
 
+  // Textová zpráva, kterou parser nerozpoznal, ale na první straně uvádí
+  // "tato zpráva má : 2 strany" (v náhledu textu v důvodu přeskočení) – další
+  // přeskočené stránky do tohoto počtu jsou její pokračování, ne samostatné
+  // zprávy. Bez toho se uložila jen první strana.
+  const preskocenoStrany = new Set(preskoceno.map((p) => p.stranka));
+  for (const p of preskoceno) {
+    if (navazujici.has(p.stranka)) continue;
+    const shoda = p.duvod.match(/zpráva\s+(?:o\s+revizi\s+)?má\s*:?\s*(\d+)\s*stran/i);
+    const pocet = shoda ? Math.min(Number(shoda[1]), CLAUDE_MAX_STRAN) : 1;
+    for (let i = 1; i < pocet; i++) {
+      if (preskocenoStrany.has(p.stranka + i)) navazujici.add(p.stranka + i);
+      else break;
+    }
+  }
+
   const hranice = [
     ...new Set(
       [...zpravyParseru.map((z) => z.stranka), ...preskoceno.filter((p) => !navazujici.has(p.stranka)).map((p) => p.stranka)].filter(
